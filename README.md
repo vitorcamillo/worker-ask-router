@@ -1,5 +1,7 @@
 # worker-ask
 
+[Licença MIT](LICENSE) · [Como contribuir](CONTRIBUTING.md)
+
 Repositório único do roteador e de todos os wrappers `-ask` locais. Não contém código do iptzao nem de outro projeto.
 
 ## Fontes
