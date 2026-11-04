@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# ask-check — detecta (a) binario que mudou desde a ultima validacao do ask-doctor
+# e (b) atualizacao disponivel nos canais conhecidos. NAO atualiza nada por conta propria.
+#
+#   ask-check            # relatorio completo
+#   ask-check --quiet    # para o timer diario: loga sempre, imprime so quando ha problema
+# Exit: 0 ok/so informativo | 2 drift (binario mudou sem revalidacao — rode ask-doctor)
+set -uo pipefail
+QUIET=0; [ "${1:-}" = "--quiet" ] && QUIET=1
+KNOWN="$HOME/.local/state/ask-doctor/known-good.txt"
+LOGDIR="$HOME/.local/state/ask-check"
+mkdir -p "$LOGDIR"
+say(){ printf '%s\n' "$1"; echo "$(date '+%F %T') $1" >> "$LOGDIR/ask-check.log"; }
+CODE=0
+
+say "== ask-check $(date '+%F %T') =="
+
+# --- 1. drift: algo mudou sem o ask-doctor revalidar? ---
+if [ ! -f "$KNOWN" ]; then
+  say "sem estado do ask-doctor — rode 'ask-doctor' uma vez para criar a base"
+  exit 2
+fi
+drift=0
+chk(){ # chk <nome> <caminho>
+  # Sem registro prévio na base não há o que comparar (base antiga): ignora.
+  # Com registro, binário sumido é drift: diagnóstico saudável com a cadeia
+  # quebrada esconderia exatamente a falha que esta checagem existe para ver.
+  grep -q "^$1[|]" "$KNOWN" || return 0
+  if [ -z "${2:-}" ]; then
+    say "DRIFT: $1 ausente (era validado pelo ask-doctor) — rode 'ask-doctor'"; drift=1; return 0
+  fi
+  local p; p="$(readlink -f "$2" 2>/dev/null)" || p=""
+  if [ -z "$p" ] || [ ! -e "$p" ]; then
+    say "DRIFT: $1 ausente (era validado pelo ask-doctor) — rode 'ask-doctor'"; drift=1; return 0
+  fi
+  grep -qxF "$(printf '%s|%s|%s' "$1" "$p" "$(stat -c '%Y %s' "$p")")" "$KNOWN" \
+    || { say "DRIFT: $1 mudou desde a ultima validacao — rode 'ask-doctor'"; drift=1; }
+}
+chk codex     "$(command -v codex)"
+chk claude    "$(command -v claude)"
+chk zcode-cli "$HOME/.local/bin/zcode-cli"
+chk zcode-bin /usr/bin/zcode
+chk muse      "$(command -v muse)"
+chk opencode  "$(command -v opencode)"
+[ "$drift" -eq 1 ] && CODE=2
+
+# --- 2. atualizacoes disponiveis (informativo; NAO instala) ---
+ver(){ # ver <nome> <atual> <pacote-npm>
+  local latest
+  latest="$(npm view "$3" version 2>/dev/null)" || { say "$1: sem canal remoto consultavel agora"; return 0; }
+  if [ -n "$latest" ] && [ "$latest" != "$2" ]; then
+    say "ATUALIZACAO DISPONIVEL: $1 $2 -> $latest (atualize de proposito; logo depois rode 'ask-doctor')"
+  else
+    say "$1: em dia ($2)"
+  fi
+}
+ver codex  "$(codex --version 2>/dev/null | awk '{print $2}')"  @openai/codex
+ver claude "$(claude --version 2>/dev/null | awk '{print $1}')" @anthropic-ai/claude-code
+say "zcode-cli: sem canal remoto conhecido — protegido por impressao digital ($([ "$drift" -eq 0 ] && echo integro || echo MUDOU))"
+
+if [ "$QUIET" -eq 0 ]; then say "exit=$CODE"; fi
+exit "$CODE"

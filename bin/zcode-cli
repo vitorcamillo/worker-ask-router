@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+
+ZCODE_CLI_ORIGINAL_UMASK="$(umask)"
+umask 077
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+HELPER="$HOME/.local/bin/zcode_headless_admit.py"
+LAUNCHER="$HOME/.local/share/zcode-worker/auth/launch.cjs"
+ZCODE_CLI_DIR="$HOME/.local/share/zcode-cli/glm"
+ZCODE_CLI_SRC="/opt/ZCode/resources/glm/zcode.cjs"
+# O gateway do plan (zcode.z.ai) devolve 405/3012 "unusual activity" quando o
+# cliente não anuncia a versão do desktop (User-Agent ZCode/unknown e sem
+# X-ZCode-App-Version). O app sempre exporta ZCODE_APP_VERSION; o worker não,
+# então derivamos da versão de runtime que o app já materializou.
+if [ -z "${ZCODE_APP_VERSION:-}" ]; then
+  ZCODE_APP_VERSION="$(
+    ls -1 "$HOME/.zcode/v2/runtime/provider/linux-x86_64" 2>/dev/null |
+      grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
+  )"
+  ZCODE_APP_VERSION="${ZCODE_APP_VERSION:-3.17.2}"
+  export ZCODE_APP_VERSION
+fi
+if [ -f "$ZCODE_CLI_SRC" ] && { [ -L "$ZCODE_CLI_DIR/zcode.cjs" ] || [ "$ZCODE_CLI_SRC" -nt "$ZCODE_CLI_DIR/zcode.cjs" ] || ! cmp -s "$ZCODE_CLI_SRC" "$ZCODE_CLI_DIR/zcode.cjs"; }; then
+  ZCODE_CLI_TMP="$(mktemp "$ZCODE_CLI_DIR/.zcode.cjs.XXXXXX")" &&
+    cp -p "$ZCODE_CLI_SRC" "$ZCODE_CLI_TMP" && chmod 755 "$ZCODE_CLI_TMP" &&
+    mv -f "$ZCODE_CLI_TMP" "$ZCODE_CLI_DIR/zcode.cjs" ||
+    { rm -f "$ZCODE_CLI_TMP"; echo "zcode-cli: falha ao sincronizar bundle" >&2; }
+fi
+for arg in "$@"; do
+  case "$arg" in
+    -p|--prompt|--prompt=*)
+      umask "$ZCODE_CLI_ORIGINAL_UMASK"
+      exec python3 "$HELPER" --exec node "$LAUNCHER" "$HOME/.local/share/zcode-cli/glm/zcode.cjs" "$@"
+      ;;
+  esac
+done
+umask "$ZCODE_CLI_ORIGINAL_UMASK"
+exec node "$LAUNCHER" "$HOME/.local/share/zcode-cli/glm/zcode.cjs" "$@"

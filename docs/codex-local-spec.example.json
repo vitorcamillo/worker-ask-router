@@ -1,0 +1,20 @@
+{
+  "task_id": "exemplo-001",
+  "objective": "Adicionar virgula e exclamacao na saudacao de hello.py",
+  "context": "Arquivo hello.py completo (linhas 1-2), preparado pelo orquestrador:\ndef saudacao(nome):\n    return f\"Ola {nome}\"\n",
+  "allowed_files": [
+    "hello.py"
+  ],
+  "steps": [
+    "Ler hello.py linhas 1-5 e confirmar o trecho fornecido em context.",
+    "Substituir somente return f\"Ola {nome}\" por return f\"Ola, {nome}!\".",
+    "Reler hello.py linhas 1-5; se o original divergir do contexto, parar como blocked."
+  ],
+  "acceptance": [
+    "hello.py contem return f\"Ola, {nome}!\" e nenhuma outra alteracao."
+  ],
+  "constraints": [
+    "Nao alterar outros arquivos"
+  ],
+  "checks": []
+}

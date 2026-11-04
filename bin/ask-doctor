@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# ask-doctor — valida a cadeia GLM/Claude/Codex/Muse/OpenCode nativa.
+#
+#   ask-doctor          # rapido: interfaces e auth (NAO queima cota de modelo)
+#   ask-doctor --full   # + uma chamada real "OK" por wrapper (queima um pouquinho de cota)
+#
+# Se tudo passa, publica a impressao digital (path|mtime|size) dos binarios em
+# ~/.local/state/ask-doctor/known-good.txt por rename atomico no mesmo diretorio
+# — o ask-check e os guardas dos wrappers usam isso para avisar quando ALGO
+# atualizar e a cadeia ainda nao foi revalidada. Em falha, preserva a base anterior.
+# Rodar sempre depois de atualizar codex, claude, zcode, muse ou opencode.
+set -uo pipefail
+
+FULL=0; [ "${1:-}" = "--full" ] && FULL=1
+STATE="$HOME/.local/state/ask-doctor"
+mkdir -p "$STATE"; KNOWN="$STATE/known-good.txt"
+FAIL=0
+pass(){ printf '  PASS  %s\n' "$1"; }
+falha(){ printf '  FAIL  %s\n' "$1"; FAIL=1; }
+
+echo "== ask-doctor: validando cadeia (modo: $([ "$FULL" -eq 1 ] && echo completo || echo rapido)) =="
+
+# --- 1. interfaces de que os wrappers dependem ---
+zcli="$HOME/.local/bin/zcode-cli"
+codex exec --help 2>&1 | grep -q -- '-o,'                   && pass "codex exec: flag -o (saida em arquivo)"  || falha "codex exec: flag -o sumiu"
+codex exec --help 2>&1 | grep -q -- '--ephemeral'           && pass "codex exec: --ephemeral"                 || falha "codex exec: --ephemeral sumiu"
+codex exec --help 2>&1 | grep -q -- '--skip-git-repo-check' && pass "codex exec: --skip-git-repo-check"       || falha "codex exec: --skip-git-repo-check sumiu"
+claude --help 2>&1 | grep -q -- '-p, --print'               && pass "claude: -p/--print"                      || falha "claude: -p/--print sumiu"
+"$zcli" --help 2>&1 | grep -q -- '--json'                   && pass "zcode-cli: --json"                       || falha "zcode-cli: --json sumiu"
+muse exec --help 2>&1 | grep -q -- '--json'                 && pass "muse exec: --json"                       || falha "muse exec: --json sumiu"
+muse exec --help 2>&1 | grep -q -- '--prompt-file'          && pass "muse exec: --prompt-file"                || falha "muse exec: --prompt-file sumiu"
+muse exec --help 2>&1 | grep -q -- '--approval-mode'        && pass "muse exec: --approval-mode"              || falha "muse exec: --approval-mode sumiu"
+muse exec --help 2>&1 | grep -q -- '--no-foreign-personal-context' && pass "muse exec: --no-foreign-personal-context" || falha "muse exec: --no-foreign-personal-context sumiu (muse-ask perde o isolamento de worker)"
+opencode run --help 2>&1 | grep -q -- '--format'          && pass "opencode run: --format json"             || falha "opencode run: --format sumiu (opencode-ask quebra)"
+opencode run --help 2>&1 | grep -q -- '--standalone'      && pass "opencode run: --standalone"              || falha "opencode run: --standalone sumiu (opencode-ask cairia no servico compartilhado, sem as travas)"
+strings "$(readlink -f "$(command -v opencode)")" 2>/dev/null | grep -c 'Blocked by configuration policy' >/dev/null \
+  && pass "opencode: policies (trava do opencode-ask)" || falha "opencode: policies sumiram do binario — opencode-ask sem trava"
+# --- pontes locais (ZCode -> CLIs oficiais); fora do ar e AVISO, nao falha ---
+for _b in 10110:zcode:glm 10111:claude-code:claude 10112:chatgpt:gpt; do
+  _porta="$(echo "$_b" | cut -d: -f1)"; _nome="$(echo "$_b" | cut -d: -f2)"; _unit="$(echo "$_b" | cut -d: -f3)"
+  if curl -s --max-time 3 "http://127.0.0.1:${_porta}/healthz" 2>/dev/null | grep -q '"ok"'; then
+    pass "bridge ${_nome}: de pe (porta ${_porta})"
+  else
+    echo "  WARN  bridge ${_nome}: fora do ar — ZCode nao roteara ${_nome} ate 'systemctl --user start ask-${_unit}-bridge'"
+  fi
+done
+
+# --- providers Claude/ChatGPT dentro do ZCode + timer de limites ---
+if [ -d "$HOME/.zcode" ]; then
+  if _p="$(ask-limites-zcode --checar 2>&1)"; then
+    pass "zcode: providers claude-code e chatgpt-codex registrados (config completa)"
+  else
+    falha "zcode: providers com problema — rode 'ask-limites-zcode --registrar' ($(echo "$_p" | head -1))"
+  fi
+  systemctl --user is-active --quiet ask-limites-zcode.timer && pass "zcode: timer de limites ativo" \
+    || echo "  WARN  zcode: ask-limites-zcode.timer parado — limites nao atualizam no nome do provider"
+  _cache="$HOME/.local/state/ask-bridges/claude-limits.json"
+  if [ -f "$_cache" ] && [ $(( $(date +%s) - $(stat -c %Y "$_cache") )) -lt 86400 ]; then
+    pass "claude: cache de limites da statusline recente"
+  else
+    echo "  WARN  claude: sem cache de limites recente (statusline so grava com uma sessao Claude Code aberta)"
+  fi
+fi
+
+# --- 2. autenticacoes nativas ---
+codex login status 2>&1 | grep -q 'Logged in'               && pass "codex: autenticado (plano ChatGPT)"      || falha "codex: sem login nativo ('codex login')"
+[ -d "$HOME/.claude" ]                                      && pass "claude: config presente"                 || falha "claude: sem ~/.claude"
+if [ -n "${META_API_KEY:-}" ] || [ -f "$HOME/.config/muse/auth.json" ]; then
+  pass "muse: credenciais presentes"
+else
+  echo "  WARN  muse: sem credenciais — muse-ask indisponivel ate 'muse login' ou META_API_KEY"
+fi
+
+# --- 3. chamadas reais (opcional) ---
+if [ "$FULL" -eq 1 ]; then
+  timeout 300 codex-ask    --cwd /tmp --mode review                              'Responda apenas: OK' >/dev/null 2>&1 && pass "real: codex-ask"    || falha "real: codex-ask"
+  timeout 300 claude-ask   --cwd /tmp                                            'Responda apenas: OK' >/dev/null 2>&1 && pass "real: claude-ask"   || falha "real: claude-ask"
+  timeout 300 zcode-worker --cwd /tmp --mode plan --timeout 240                   'Responda apenas: OK' >/dev/null 2>&1 && pass "real: zcode-worker" || falha "real: zcode-worker"
+  if [ -n "${META_API_KEY:-}" ] || [ -f "$HOME/.config/muse/auth.json" ]; then
+    timeout 300 muse-ask     --cwd /tmp                                            'Responda apenas: OK' >/dev/null 2>&1 && pass "real: muse-ask"     || falha "real: muse-ask"
+  fi
+
+  timeout 300 opencode-ask --cwd /tmp                                            'Responda apenas: OK' >/dev/null 2>&1 && pass "real: opencode-ask" || falha "real: opencode-ask"
+fi
+
+# --- 4. impressao digital dos binarios (base do anti-drift) ---
+# Escreve em temporario no MESMO diretorio e so publica (rename atomico) com
+# FAIL=0: uma validacao reprovada nunca vira "known-good" nem apaga a anterior.
+TMPKNOWN="$(mktemp "$STATE/.known-good.XXXXXX")"
+if [ -z "$TMPKNOWN" ] || [ ! -f "$TMPKNOWN" ]; then
+  echo "ask-doctor: sem temporario para a digital; base anterior preservada" >&2
+  exit 1
+fi
+fp(){ # fp <nome> <caminho>
+  local p; p="$(readlink -f "$2" 2>/dev/null)" || return 0
+  [ -e "$p" ] || return 0
+  printf '%s|%s|%s\n' "$1" "$p" "$(stat -c '%Y %s' "$p")" >> "$TMPKNOWN"
+}
+fp codex     "$(command -v codex)"
+fp claude    "$(command -v claude)"
+fp zcode-cli "$zcli"
+fp zcode-bin /usr/bin/zcode
+fp muse      "$(command -v muse)"
+fp opencode  "$(command -v opencode)"
+if [ "$FAIL" -eq 0 ]; then
+  _itens="$(wc -l < "$TMPKNOWN")"
+  if mv -f "$TMPKNOWN" "$KNOWN" && [ -f "$KNOWN" ]; then
+    printf 'digital gravada: %s (%s itens)\n' "$KNOWN" "$_itens"
+  else
+    rm -f "$TMPKNOWN"
+    echo "ask-doctor: falha ao publicar a digital (mv); base anterior preservada: $KNOWN" >&2
+    exit 1
+  fi
+else
+  rm -f "$TMPKNOWN"
+  echo "digital nao gravada (validacao falhou); base anterior preservada: $KNOWN"
+fi
+
+exit "$FAIL"

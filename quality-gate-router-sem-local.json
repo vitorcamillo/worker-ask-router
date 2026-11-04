@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "project_root": ".",
+  "created_at": "2026-10-28T15:46:41.111839+00:00",
+  "scope": {
+    "risk": "medio; retirar flags locais e manter cadeia normal. Cobertura limitada explicitamente ao contrato CLI e funções de roteamento afetadas.",
+    "changed_files": [
+      "worker_router.py",
+      "tests/test_codex_local_router.py",
+      "docs/codex-local.md",
+      "scripts/verificar_router_sem_local.py",
+      "quality-gate-router-sem-local.json"
+    ]
+  },
+  "checks": {
+    "unit": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local_router.py",
+          "tests/test_worker_router.py",
+          "tests/test_runs_log.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Validação do delta; métricas derivadas dos comandos/artefatos. Mutação é amostra explícita, não exaustiva."
+    },
+    "gherkin": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local_router.py",
+          "-k",
+          "flags_locais or cadeia"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Cenários equivalentes executáveis em pytest; host real com modelo/ferramentas simulados, sem envio externo."
+    },
+    "quality": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "ruff",
+          "check",
+          "worker_router.py",
+          "tests/test_codex_local_router.py",
+          "scripts/verificar_router_sem_local.py"
+        ],
+        [
+          "git",
+          "diff",
+          "--check"
+        ],
+        [
+          "python3",
+          "-m",
+          "compileall",
+          "-q",
+          "worker_router.py",
+          "tests/test_codex_local_router.py",
+          "scripts/verificar_router_sem_local.py"
+        ],
+        [
+          "gitleaks",
+          "dir",
+          "worker_router.py",
+          "--no-banner",
+          "--redact"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "scripts/verificar_router_sem_local.py"
+      ],
+      "reason": "Validação do delta; métricas derivadas dos comandos/artefatos. Mutação é amostra explícita, não exaustiva."
+    },
+    "metrics": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "-c",
+          "import ast,json;from pathlib import Path;p=Path('tests/test_codex_local_router.py');t=ast.parse(p.read_text());n=sum(isinstance(x,ast.FunctionDef) and x.name.startswith(\"test_\") for x in ast.walk(t));print(json.dumps({\"test_functions\":n}));assert n>0"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "scripts/verificar_router_sem_local.py"
+      ],
+      "reason": "Validação do delta; métricas derivadas dos comandos/artefatos. Mutação é amostra explícita, não exaustiva."
+    },
+    "mutation": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "scripts/verificar_router_sem_local.py",
+          "mutacao"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Validação do delta; métricas derivadas dos comandos/artefatos. Mutação é amostra explícita, não exaustiva.",
+      "thresholds": {
+        "mutation_score_pct": 100
+      }
+    },
+    "coverage": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "scripts/verificar_router_sem_local.py",
+          "cobertura"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Validação do delta; métricas derivadas dos comandos/artefatos. Mutação é amostra explícita, não exaustiva.",
+      "thresholds": {
+        "coverage_line_pct": 80,
+        "coverage_branch_pct": 70
+      }
+    },
+    "acceptance": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local_router.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Cenários equivalentes executáveis em pytest; host real com modelo/ferramentas simulados, sem envio externo."
+    },
+    "qa": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local_router.py",
+          "-k",
+          "recusad or default or build_argv"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Cenários equivalentes executáveis em pytest; host real com modelo/ferramentas simulados, sem envio externo."
+    },
+    "e2e": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local_router.py",
+          "-k",
+          "stub or cadeia"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local_router.py"
+      ],
+      "reason": "Cenários equivalentes executáveis em pytest; host real com modelo/ferramentas simulados, sem envio externo."
+    }
+  },
+  "metrics": {
+    "unit_pass_rate": null,
+    "gherkin_pass_rate": null,
+    "acceptance_pass_rate": null,
+    "qa_pass_rate": null,
+    "e2e_pass_rate": null,
+    "coverage_line_pct": null,
+    "coverage_branch_pct": null,
+    "mutation_score_pct": null
+  }
+}

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+_ask_helper="$(dirname "$0")/ask_presentation.py"
+if [ "${ASK_PRESENTATION_ACTIVE:-}" != "1" ] && [ -f "$_ask_helper" ]; then
+  exec python3 "$_ask_helper" --provider "bonsai-ask" -- "$0" "$@"
+fi
+/usr/bin/python3 "$(dirname "$(readlink -f "$0")")/../adapters/bonsai/scripts/game_guard.py" check || exit $?
+exec python3 "$(dirname "$(readlink -f "$0")")/../adapters/bonsai/scripts/bonsai_client.py" "$@"

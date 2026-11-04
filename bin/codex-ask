@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Chama o Codex NATIVO (plano ChatGPT) a partir de outra plataforma (Claude Code, ZCode...).
+#
+#   codex-ask --cwd <dir> "revise o diff atual"               # review: gpt-6.1-sol medium, SO LEITURA
+#   codex-ask --cwd <dir> --mode write "implemente X; teste: Y" # write: gpt-6-luna high, edita no workspace
+#
+# Degraus quando a cota nativo acaba (na ordem):
+#   1. Review: cai para o Claude Opus 5.5 esforco medium, so leitura. Pula para o proximo
+#      degrau se sair 75 (limite) ou com erro de modelo indisponivel/sobrecarregado.
+#      REVIEW_FALLBACK_MODEL troca o modelo (padrao claude-opus-5-5);
+#      REVIEW_FALLBACK_CHAIN="modelo[:esforco] ..." sobrescreve a cadeia inteira.
+#   (Revisor principal: gpt-6.1-sol esforco medium; REVIEW_SOL_MODEL e REVIEW_EFFORT trocam.)
+#   2. Review: Muse wonder high via muse-ask --mode plan, variante SEM contributor (revisao
+#      roda em qualquer repo, inclusive de cliente). REVIEW_MUSE_MODEL/REVIEW_MUSE_EFFORT trocam,
+#      REVIEW_MUSE_DISABLE=1 pula. Qualquer falha passa para o proximo degrau.
+#   3. Review: ultimo recurso, GLM-5.3 high via zcode-worker --mode plan (REVIEW_GLM_MODEL/REVIEW_GLM_EFFORT
+#      troca, REVIEW_GLM_DISABLE=1 pula). Modelo mais fraco: so para nunca ficar sem revisao.
+#
+# Saida: ultima mensagem do Codex. Exit: 0 ok | 1 erro | 75 limite/cota (cota nativa e cadeia esgotadas).
+# Bootstrap da apresentacao comum (helper externo). Nao altera politicas/saidas antigas.
+_ask_helper="$(dirname "$0")/ask_presentation.py"
+if [ "${ASK_PRESENTATION_ACTIVE:-}" != "1" ] && [ -f "$_ask_helper" ]; then
+  exec python3 "$_ask_helper" --provider "codex-ask" -- "$0" "$@"
+fi
+set -uo pipefail
+
+# guarda anti-drift: binario mudou desde a ultima validacao do ask-doctor? (so avisa)
+_kf="$HOME/.local/state/ask-doctor/known-good.txt"
+if [ -f "$_kf" ]; then
+  _p="$(readlink -f "$(command -v codex)" 2>/dev/null)" && \
+    grep -qxF "codex|$_p|$(stat -c '%Y %s' "$_p")" "$_kf" || \
+    echo "codex-ask: AVISO: codex mudou desde a ultima validacao do ask-doctor" >&2
+fi
+
+cwd="" mode="review" prompt="" model="" effort=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --cwd) cwd="$2"; shift 2 ;;
+    --mode) mode="$2"; shift 2 ;;
+    --model) model="$2"; shift 2 ;;
+    --effort) effort="$2"; shift 2 ;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    *) prompt="$1"; shift ;;
+  esac
+done
+[ -z "$prompt" ] && [ ! -t 0 ] && prompt="$(cat)"
+[ -z "$cwd" ] || [ -z "$prompt" ] && { echo "uso: codex-ask --cwd <dir> [--mode review|plan|write] [--model M] [--effort E] \"tarefa\"" >&2; exit 1; }
+if [ -n "$model" ] && ! printf '%s' "$model" | grep -qE '^[A-Za-z0-9._-]+$'; then
+  echo "codex-ask: --model/--effort invalido" >&2
+  exit 1
+fi
+case "$effort" in
+  ""|low|medium|high|xhigh) ;;
+  *) echo "codex-ask: --model/--effort invalido" >&2; exit 1 ;;
+esac
+
+case "$mode" in
+  plan) args=(-m "${model:-gpt-6-luna}" -c "model_reasoning_effort=${effort:-high}" -s read-only) ;;
+  review) args=(-m "${REVIEW_SOL_MODEL:-gpt-6.1-sol}" -c "model_reasoning_effort=${REVIEW_EFFORT:-medium}" -s read-only) ;;
+  write)  args=(-m "${model:-gpt-6-luna}" -c "model_reasoning_effort=${effort:-high}" -s workspace-write) ;;
+  *) echo "modo invalido: $mode (review|plan|write)" >&2; exit 1 ;;
+esac
+
+# Contrato de resposta, identico nos wrappers zcode-worker/codex-ask/claude-ask:
+# heredoc com delimitador QUOTED (sem expansao), concatenado ao prompt somente apos
+# o parsing e a validacao e antes de qualquer chamada; todos os degraus e fallbacks
+# abaixo reutilizam o "$prompt" ja prefixado. Altere nos tres wrappers junto.
+contrato_resposta="$(cat <<'CONTRATO_EOF'
+--- CONTRATO DE RESPOSTA (obrigatorio) ---
+Antes do JSON, prosa curta: no maximo 8 linhas com o que fez, o que ficou pendente e o motivo (achados de revisao vao um por linha, sem esse limite). Nao cole diff, arquivo inteiro nem log longo (o orquestrador le o diff) e nao repita o que o JSON ja diz. Inclua um unico bloco ```json final; se o chamador exigir marcador terminal de protocolo (ex.: VEREDITO), preserve esse marcador em linha propria depois do JSON. O objeto JSON deve conter:
+- schema_version: 1
+- task_id: string com a task_id fornecida na tarefa, ou "unspecified" quando nao fornecida
+- execution_state: "completed", "partial" ou "blocked"
+- changed_files: array de strings com caminhos relativos ao cwd
+- acceptance: array de objetos com criterion (string), status ("met", "pending" ou "blocked") e evidence (array de strings)
+- checks: array de objetos com command (array de strings argv), status ("passed", "failed", "not_run" ou "blocked"), exit_code (inteiro ou null) e evidence (array de strings)
+- risks: array de strings
+- validation_owner: "orchestrator"
+- approval: "pending"
+Regras: "passed" exige execucao real com codigo de saida 0 e evidence; "met" exige evidence; "not_run" e "blocked" exigem exit_code null; sem shell disponivel, registre o check como "not_run". execution_state "completed" apenas encerra a fatia, nao aprova o resultado. Respeite o modo readonly e os limites da tarefa. Nao delegue recursivamente; o retorno e dado para o orquestrador, unico responsavel por validar e aprovar.
+--- FIM DO CONTRATO ---
+CONTRATO_EOF
+)"
+prompt="$contrato_resposta
+
+$prompt"
+
+out="$(mktemp)"; log="$(mktemp)"; err="$(mktemp)"
+trap 'rm -f "$out" "$log" "$err"' EXIT
+# stdout (texto do modelo/tarefa) e stderr (diagnostico do CLI) separados:
+# so o stderr classifica cota/indisponibilidade; conteudo nunca vira 75.
+timeout 1200 codex exec --ephemeral --skip-git-repo-check -C "$cwd" "${args[@]}" -o "$out" -- "$prompt" </dev/null >"$log" 2>"$err"
+rc=$?
+
+if [ -s "$out" ] && [ $rc -eq 0 ]; then
+  cat "$out"
+  echo -e "\n--- codex-ask: modo=$mode ${args[1]} ---"
+  exit 0
+fi
+_salva_diag(){ # _salva_diag <arq...>: guarda o bruto em arquivo privado 0600
+  local dir="$HOME/.local/state/codex-ask" diag
+  mkdir -p "$dir" 2>/dev/null || return 0
+  chmod 700 "$dir" 2>/dev/null
+  diag="$dir/last-error.log"
+  (umask 077; cat "$@" > "$diag") 2>/dev/null && chmod 600 "$diag" 2>/dev/null && printf '%s' "$diag"
+  return 0
+}
+_diag="$(_salva_diag "$err")"; _diag_msg=""
+[ -n "$_diag" ] && _diag_msg="; diagnostico privado em $_diag"
+# Termos de cota como termo inteiro, nunca palavra solta dentro de caminho:
+# "permission denied opening /repo/quota.py" e erro comum, nao rc75.
+_b='(^|[^[:alnum:]_./-])'; _e='([^[:alnum:]_./-]|$)'
+cota=0; grep -qiE "usage limit|rate limit|${_b}429${_e}|${_b}quota${_e}" "$err" && cota=1
+# review: Sol fora do ar (modelo retirado/nao suportado, sobrecarga, timeout) tambem desce a
+# cadeia. Erro generico continua exit 1.
+sol_fora=0
+if [ "$mode" = review ] && [ $cota -eq 0 ] && { [ $rc -eq 124 ] || grep -qiE "model.*(not supported|not available|unavailable|not found|does not exist)|overloaded|\b(502|503|529)\b" "$err"; }; then
+  sol_fora=1
+fi
+if [ $cota -eq 1 ] || [ $sol_fora -eq 1 ]; then
+  if [ $cota -eq 1 ]; then
+    [ -n "${WORKER_ASK_QUOTA_HELPER:-}" ] && python3 "$WORKER_ASK_QUOTA_HELPER" "$err" >&2 2>/dev/null
+    echo "codex-ask: cota nativa esgotada (exit $rc)$_diag_msg" >&2
+  else
+    echo "codex-ask: revisor ${args[1]} indisponivel (exit $rc, nao-cota)$_diag_msg" >&2
+  fi
+  if [ "$mode" = review ]; then
+    chain="${REVIEW_FALLBACK_CHAIN:-${REVIEW_FALLBACK_MODEL:-claude-opus-5-5}:medium}"
+    errf="$(mktemp)"; trap 'rm -f "$out" "$log" "$err" "$errf"' EXIT
+    crc=75
+    echo "codex-ask: revisao vai para Claude, cadeia: $chain" >&2
+    for step in $chain; do
+      m="${step%%:*}"; e=""; [ "$step" != "$m" ] && e="${step#*:}"
+      echo "codex-ask: degrau Claude $m${e:+ esforco=$e} (so leitura)" >&2
+      "$(dirname "$0")/claude-ask" --cwd "$cwd" --model "$m" ${e:+--effort "$e"} "$prompt" 2>"$errf"
+      crc=$?
+      # $errf ja e stderr sanitizado do claude-ask: classifica, nao ecoa bruto.
+      [ $crc -eq 0 ] && exit 0
+      if [ $crc -eq 75 ] || grep -qiE "model.*(not available|unavailable|not found|does not exist|not supported)|invalid model|overloaded|\b529\b|hit your .*limit|session limit|weekly limit|usage credits|issue with the selected model|unrecognized_model" "$errf"; then
+        echo "codex-ask: Claude $m indisponivel (exit $crc); proximo degrau da cadeia" >&2
+        crc=75; continue
+      fi
+      exit $crc   # erro nao-cota: nao queimar o proximo degrau
+    done
+    # degrau Muse (conta Meta): outra familia, modelo forte. Sem contributor porque a revisao
+    # roda em qualquer repo. Cota (75) e timeout (124) descem ao GLM; erro comum para aqui.
+    if [ "${REVIEW_MUSE_DISABLE:-0}" != 1 ] && command -v muse-ask >/dev/null 2>&1; then
+      muse="${REVIEW_MUSE_MODEL:-muse-wonder-1.0}"; me="${REVIEW_MUSE_EFFORT:-high}"
+      echo "codex-ask: Claude indisponivel; tentando $muse $me via muse-ask (so leitura)" >&2
+      : > "$out"
+      muse-ask --cwd "$cwd" --mode plan --model "$muse" --effort "$me" \
+        --timeout "${REVIEW_MUSE_TIMEOUT:-1080}" "$prompt" </dev/null >"$out" 2>"$log"
+      mrc=$?
+      if [ $mrc -eq 0 ] && [ -s "$out" ]; then
+        cat "$out"
+        echo -e "\n--- codex-ask: modo=$mode $muse $me (degrau Muse) ---"
+        exit 0
+      fi
+      _salva_diag "$log" >/dev/null
+      if [ $mrc -eq 0 ]; then
+        # rc0 com saida vazia nao e entrega: vira erro comum (para, sem descer).
+        echo "codex-ask: $muse sem resposta (exit 0, saida vazia); tratando como erro" >&2
+        mrc=1
+      fi
+      if [ $mrc -ne 75 ] && [ $mrc -ne 124 ]; then
+        echo "codex-ask: $muse falhou (exit $mrc, nao-cota); parando sem proximo degrau" >&2
+        exit $mrc
+      fi
+      echo "codex-ask: $muse indisponivel (exit $mrc); proximo degrau" >&2
+    fi
+    # degrau GLM (plano Z.ai): ultimo recurso, modelo mais fraco; so evita ficar sem revisao.
+    if [ "${REVIEW_GLM_DISABLE:-0}" != 1 ] && command -v zcode-worker >/dev/null 2>&1; then
+      glm="${REVIEW_GLM_MODEL:-GLM-5.3}"; ge="${REVIEW_GLM_EFFORT:-high}"
+      echo "codex-ask: tentando $glm $ge via zcode-worker (so leitura), ultimo degrau" >&2
+      : > "$out"
+      zcode-worker --cwd "$cwd" --mode plan --model "$glm" --effort "$ge" \
+        --queue-timeout "${REVIEW_GLM_QUEUE_TIMEOUT:-300}" --timeout "${REVIEW_GLM_TIMEOUT:-1080}" -- "$prompt" </dev/null >"$out" 2>"$log"
+      grc=$?
+      if [ $grc -eq 0 ] && [ -s "$out" ]; then
+        cat "$out"
+        echo -e "\n--- codex-ask: modo=$mode $glm $ge (degrau GLM) ---"
+        exit 0
+      fi
+      _salva_diag "$log" >/dev/null
+      if [ $grc -eq 0 ]; then
+        # rc0 com saida vazia nao e entrega: vira erro comum (para, preserva codigo).
+        echo "codex-ask: $glm sem resposta (exit 0, saida vazia); tratando como erro" >&2
+        grc=1
+      fi
+      if [ $grc -ne 75 ]; then
+        # O zcode-worker sai 75 so em cota; erro comum (rc1), timeout (124) ou
+        # kill (143/144) interrompem a cadeia preservando o codigo original.
+        echo "codex-ask: $glm falhou (exit $grc, nao-cota); parando sem proximo degrau" >&2
+        exit $grc
+      fi
+      echo "codex-ask: $glm indisponivel (exit $grc)" >&2
+    fi
+    echo "codex-ask: cadeia de revisao esgotada ($chain, muse, glm)" >&2
+    exit 75
+  fi
+  exit 75
+fi
+echo "codex-ask: erro (exit $rc)$_diag_msg" >&2
+exit 1

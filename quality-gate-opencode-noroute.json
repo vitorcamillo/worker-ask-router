@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "project_root": ".",
+  "created_at": "2026-11-03T13:55:00+00:00",
+  "scope": {
+    "risk": "baixo/medio; amplia a regex de indisponibilidade do opencode-ask para provider.no-route ('Model unavailable'), habilitando fallback interno de modelo e saida 75. Roteador inalterado; a trava de snapshot do rc75 continua valendo.",
+    "changed_files": [
+      "bin/opencode-ask",
+      "tests/test_opencode.py",
+      "scripts/verificar_opencode_noroute.py",
+      "quality-gate-opencode-noroute.json"
+    ]
+  },
+  "checks": {
+    "unit": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "python3", "-m", "pytest", "-q", "tests/test_opencode.py"]],
+      "command_results": [],
+      "evidence": ["tests/test_opencode.py"],
+      "reason": "Testes do wrapper com opencode falso: 17 existentes + 3 de no-route."
+    },
+    "gherkin": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "python3", "-m", "pytest", "-q", "tests/test_opencode.py", "-k", "noroute"]],
+      "command_results": [],
+      "evidence": ["tests/test_opencode.py"],
+      "reason": "Cenarios equivalentes executaveis: dado modelo indisponivel, quando roda auto, entao cai para o reserva; dado todos indisponiveis, entao sai 75 com data de volta."
+    },
+    "quality": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        ["bash", "-n", "bin/opencode-ask"],
+        ["ruff", "check", "tests/test_opencode.py", "scripts/verificar_opencode_noroute.py"],
+        ["git", "diff", "--check"],
+        ["gitleaks", "dir", "tests/test_opencode.py", "--no-banner", "--redact"],
+        ["gitleaks", "dir", "scripts/verificar_opencode_noroute.py", "--no-banner", "--redact"]
+      ],
+      "command_results": [],
+      "evidence": ["bin/opencode-ask"],
+      "reason": "Sintaxe bash, lint Python, whitespace do diff e secrets nos arquivos novos/alterados."
+    },
+    "metrics": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["python3", "-c", "import ast,json;from pathlib import Path;t=ast.parse(Path('tests/test_opencode.py').read_text());n=sum(isinstance(x,ast.FunctionDef) and x.name.startswith('test_noroute') for x in ast.walk(t));print(json.dumps({'noroute_tests':n}));assert n>=3"]],
+      "command_results": [],
+      "evidence": ["tests/test_opencode.py"],
+      "reason": "Conta os testes novos do delta; taxas de aprovacao vem dos blocos."
+    },
+    "mutation": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["python3", "scripts/verificar_opencode_noroute.py", "mutacao"]],
+      "command_results": [],
+      "evidence": ["scripts/verificar_opencode_noroute.py"],
+      "reason": "Mutantes que removem o no-route de cada linha do delta; 1 equivalente marcado com motivo.",
+      "thresholds": {"mutation_score_pct": 100}
+    },
+    "coverage": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["python3", "scripts/verificar_opencode_noroute.py", "cobertura"]],
+      "command_results": [],
+      "evidence": ["scripts/verificar_opencode_noroute.py"],
+      "reason": "Cobertura por xtrace das 2 linhas alteradas e seus 4 ramos.",
+      "thresholds": {"coverage_line_pct": 100, "coverage_branch_pct": 75}
+    },
+    "acceptance": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "python3", "-m", "pytest", "-q", "tests/test_opencode.py", "-k", "noroute or common_failure_not_fallback"]],
+      "command_results": [],
+      "evidence": ["tests/test_opencode.py"],
+      "reason": "Criterios: no-route aciona reserva; todos indisponiveis -> rc75; modelo explicito sem fallback; falha comum continua rc1."
+    },
+    "qa": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "python3", "-m", "pytest", "-q", "tests/test_opencode.py", "tests/test_worker_router.py", "tests/test_wrappers.py"]],
+      "command_results": [],
+      "evidence": ["tests/test_opencode.py"],
+      "reason": "Regressao do wrapper e do roteador (negativos: timeout, texto do modelo citando quota, falha comum)."
+    },
+    "e2e": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [["env", "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1", "python3", "-m", "pytest", "-q", "tests/test_opencode.py", "-k", "noroute_all_exits_75"]],
+      "command_results": [],
+      "evidence": ["tests/test_opencode.py"],
+      "reason": "CLI real do wrapper com opencode falso; alem disso, chamada real em 2026-11-03 06:31 UTC: OpenCode rc75 -> Codex -> Claude (runs.jsonl local, fora do repositório)."
+    }
+  }
+}

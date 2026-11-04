@@ -1,0 +1,292 @@
+{
+  "schema_version": 1,
+  "project_root": ".",
+  "created_at": "2026-10-28T07:12:45.354808+00:00",
+  "scope": {
+    "risk": "medio: CLI local executa ferramentas no sandbox nativo; contrato de arquivos não é sandbox por arquivo; uma execução por usuário",
+    "changed_files": [
+      "bin/codex-local",
+      "worker_router.py",
+      "scripts/install.py",
+      "tests/test_codex_local.py",
+      "tests/test_codex_local_router.py",
+      "scripts/check_codex_local_mutation.py",
+      "docs/codex-local.md",
+      "docs/codex-local-spec.example.json",
+      "quality-gate-codex-local.json"
+    ],
+    "acceptance": [
+      "worker recebe contexto e passos específicos",
+      "harness global ausente no preflight",
+      "janela efetiva respeita servidor e teto32K",
+      "somente uma execução local por vez",
+      "rota --local isolada sem fallback cloud",
+      "edição local real e contrato validado pelo orquestrador"
+    ]
+  },
+  "checks": {
+    "unit": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local.py",
+          "tests/test_codex_local_router.py",
+          "tests/test_install.py",
+          "tests/test_worker_router.py",
+          "tests/test_runs_log.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py"
+      ],
+      "reason": "runtime, router local, instalador e regressões relevantes"
+    },
+    "gherkin": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local.py",
+          "-k",
+          "given_"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py"
+      ],
+      "reason": "cenarios BDD test_given_when_then; runner executa apos runtime pronto"
+    },
+    "quality": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "ruff",
+          "check",
+          "bin/codex-local",
+          "worker_router.py",
+          "scripts/install.py",
+          "tests/test_codex_local.py",
+          "tests/test_codex_local_router.py",
+          "scripts/check_codex_local_mutation.py"
+        ],
+        [
+          "bandit",
+          "-q",
+          "bin/codex-local",
+          "-ll"
+        ],
+        [
+          "gitleaks",
+          "dir",
+          "bin/codex-local",
+          "--no-banner",
+          "--redact"
+        ],
+        [
+          "git",
+          "diff",
+          "--check"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py",
+        "scripts/check_codex_local_mutation.py"
+      ],
+      "reason": "lint cobre runtime, roteador e testes; unused no runtime pertence a fatia runtime"
+    },
+    "metrics": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "-c",
+          "import json,hashlib; from pathlib import Path; p=Path(\"out/codex-local/native-smoke.json\"); d=json.loads(p.read_text()); assert d[\"source_sha256\"]==hashlib.sha256(Path(\"bin/codex-local\").read_bytes()).hexdigest(); assert d[\"result\"]==\"PASS\"; print(\"native smoke hash and evidence: PASS\")"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "out/codex-local/native-smoke.json",
+        "out/codex-local/worker-failures.json"
+      ],
+      "reason": "hash da inferência real e métricas de cobertura/mutação coletadas pelo runner"
+    },
+    "mutation": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "scripts/check_codex_local_mutation.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "scripts/check_codex_local_mutation.py",
+        "tests/test_codex_local.py"
+      ],
+      "reason": "amostra explicita de 7 guardas (host, chaves, abs, dotdot, teto ctx, orcamento, subset); guarda ausente ou baseline rc5 bloqueia com rc2",
+      "thresholds": {
+        "mutation_score_pct": 100
+      }
+    },
+    "coverage": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "-m",
+          "coverage",
+          "erase"
+        ],
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "CODEX_LOCAL_TEST_INPROCESS=1",
+          "python3",
+          "-m",
+          "coverage",
+          "run",
+          "--branch",
+          "--include=*/bin/codex-local",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local.py"
+        ],
+        [
+          "python3",
+          "-m",
+          "coverage",
+          "json",
+          "-o",
+          "out/codex-local/coverage.json"
+        ],
+        [
+          "python3",
+          "scripts/export_metrics.py",
+          "coverage",
+          "--module",
+          "bin/codex-local",
+          "--root",
+          "out",
+          "--coverage-json",
+          "out/codex-local/coverage.json"
+        ],
+        [
+          "python3",
+          "-m",
+          "coverage",
+          "report",
+          "--include=*/bin/codex-local"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py",
+        "scripts/export_metrics.py"
+      ],
+      "reason": "mede bin/codex-local (nao os testes); in-process via env, processos reais isolados; exporta jacoco para out/target",
+      "thresholds": {
+        "coverage_line_pct": 80,
+        "coverage_branch_pct": 70
+      }
+    },
+    "acceptance": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local.py",
+          "-m",
+          "acceptance"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py",
+        "docs/codex-local.md",
+        "out/codex-local/native-smoke.json"
+      ],
+      "reason": "template/help/exec valido com context obrigatorio; runner executa"
+    },
+    "qa": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local.py",
+          "-m",
+          "qa"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py"
+      ],
+      "reason": "rejeicoes adversariais, orcamento, preflight failclosed, singleton, timeout, sigilo; runner executa"
+    },
+    "e2e": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_codex_local.py",
+          "-m",
+          "e2e"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_codex_local.py"
+      ],
+      "reason": "CLI ponta a ponta com codex fake e HTTP loopback sintetico; sem modelo real"
+    }
+  },
+  "metrics": {
+    "unit_pass_rate": null,
+    "gherkin_pass_rate": null,
+    "acceptance_pass_rate": null,
+    "qa_pass_rate": null,
+    "e2e_pass_rate": null,
+    "coverage_line_pct": null,
+    "coverage_branch_pct": null,
+    "mutation_score_pct": null
+  }
+}

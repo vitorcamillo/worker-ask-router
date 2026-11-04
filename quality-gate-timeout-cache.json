@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "project_root": ".",
+  "created_at": "2026-10-28T12:00:00+00:00",
+  "scope": {
+    "risk": "medio: circuito de timeout e precedencia de cota no cache do roteador",
+    "changed_files": [
+      "worker_router.py",
+      "tests/test_quota_reset.py",
+      "scripts/check_timeout_cache.py",
+      "quality-gate-timeout-cache.json"
+    ],
+    "acceptance": [
+      "cota conhecida nao e sobrescrita por timeout",
+      "marcador timeout numerico preservado ate expirar o cooldown",
+      "TIMEOUT_COOLDOWN_SECONDS positivo com expiracao automatica",
+      "legado timeout sem until e descartado e migra para quota",
+      "retry explicito limpa bloqueio e quota persiste entre chamadas"
+    ]
+  },
+  "checks": {
+    "unit": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_worker_router.py",
+          "tests/test_quota_reset.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_worker_router.py",
+        "tests/test_quota_reset.py"
+      ],
+      "reason": "regressao do roteador mais delta de timeout/cache; CLI sintetica, sem contas"
+    },
+    "gherkin": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_quota_reset.py",
+          "-k",
+          "e2e_quota_persists_and_second_call_skips_without_retry or timeout_opens_circuit_for_next_call or legacy_timeout_cache_migrates_and_unknown_quota_preserved or admission_busy_does_not_persist_quota or successful_explicit_retry_clears_unknown_block"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_quota_reset.py"
+      ],
+      "reason": "cenarios de negocio executados via testes nomeados equivalentes; sem .feature separado"
+    },
+    "quality": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "ruff",
+          "check",
+          "worker_router.py",
+          "quota_reset.py",
+          "tests/test_quota_reset.py",
+          "scripts/check_timeout_cache.py"
+        ],
+        [
+          "git",
+          "diff",
+          "--check"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "worker_router.py",
+        "scripts/check_timeout_cache.py"
+      ],
+      "reason": "lint do delta e do script do gate mais whitespace; sem rede nem privilegios"
+    },
+    "metrics": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "-c",
+          "import ast, json; from pathlib import Path; tree = ast.parse(Path('tests/test_quota_reset.py').read_text()); names = sorted({n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name.startswith('test_')}); keys = ('timeout', 'quota', 'cache', 'circuit', 'legacy', 'cooldown'); sel = [n for n in names if any(k in n for k in keys)]; import worker_router as w; print(json.dumps({'timeout_cache_tests': len(sel), 'total_tests': len(names), 'timeout_cooldown_seconds': w.TIMEOUT_COOLDOWN_SECONDS})); assert w.TIMEOUT_COOLDOWN_SECONDS > 0, 'cooldown deve ser positivo'"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "worker_router.py",
+        "tests/test_quota_reset.py"
+      ],
+      "reason": "contagem real de testes do delta e cooldown vigente; taxas e mutation/coverage numericos vêm dos XMLs do runner"
+    },
+    "mutation": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "scripts/check_timeout_cache.py",
+          "mutation"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "scripts/check_timeout_cache.py",
+        "tests/test_quota_reset.py",
+        "worker_router.py"
+      ],
+      "reason": "4 mutantes do delta em copia temporaria; baseline verde e morte exigidas, infra nao conta",
+      "thresholds": {
+        "mutation_score_pct": 100
+      }
+    },
+    "coverage": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "scripts/check_timeout_cache.py",
+          "coverage"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "scripts/check_timeout_cache.py",
+        "tests/test_quota_reset.py",
+        "coverage.ini"
+      ],
+      "reason": "branches do delta via coverage.py com patch subprocess; escopo declarado no relatorio",
+      "thresholds": {
+        "coverage_line_pct": 85,
+        "coverage_branch_pct": 75
+      }
+    },
+    "acceptance": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_quota_reset.py",
+          "-k",
+          "e2e_quota_persists or timeout_opens_circuit or legacy_timeout or successful_explicit_retry or admission_busy or quota_query_respects"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_quota_reset.py"
+      ],
+      "reason": "criterios do aceite via CLI sintetica; runner executa"
+    },
+    "qa": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_quota_reset.py",
+          "-k",
+          "invalid_reset or concurrent or new_unknown or shorter_new or unknown_quota or timeout_does_not or late_quota or multiple_exhausted or real_shell or helper_emits"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_quota_reset.py"
+      ],
+      "reason": "negativos, regressao, concorrencia, limites e preservacao de sigilo; runner executa"
+    },
+    "e2e": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_quota_reset.py",
+          "-k",
+          "e2e_quota_persists or real_shell_wrapper or helper_emits_only or timeout_opens_circuit"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [
+        "tests/test_quota_reset.py"
+      ],
+      "reason": "ponta a ponta na CLI sintetica com wrappers falsos; sem modelo real"
+    }
+  },
+  "metrics": {
+    "unit_pass_rate": null,
+    "gherkin_pass_rate": null,
+    "acceptance_pass_rate": null,
+    "qa_pass_rate": null,
+    "e2e_pass_rate": null,
+    "coverage_line_pct": null,
+    "coverage_branch_pct": null,
+    "mutation_score_pct": null
+  }
+}

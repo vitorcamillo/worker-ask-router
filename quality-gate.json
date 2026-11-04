@@ -1,0 +1,416 @@
+{
+  "schema_version": 1,
+  "project_root": ".",
+  "created_at": "2026-10-26T07:25:27.315009+00:00",
+  "scope": {
+    "risk": "medio: unificacao dos wrappers, instalacao atomica de codigo e preservacao de dados privados",
+    "changed_files": [
+      "worker_router.py",
+      "tests/",
+      "adapters/zcode/",
+      "bin/",
+      "scripts/",
+      "README.md",
+      "AGENTS.md",
+      ".gitignore",
+      "coverage.ini",
+      "migration-sources.json",
+      "pyproject.toml",
+      "conftest.py",
+      "adapters/zcode/scripts/make_candidate.py",
+      "bin/*-ask",
+      "bin/ask-doctor",
+      "bin/ask-check",
+      "adapters/bonsai/",
+      "scripts/install.py",
+      "tests/test_install.py",
+      "tests/test_muse_wrapper.py",
+      "tests/test_wrappers.py",
+      "tests/test_opencode.py",
+      "tests/test_presentation_ask.py",
+      "adapters/zcode/src/zcode_worker/base.py",
+      "bin/zcode-worker",
+      "adapters/zcode/tests/test_cli_admission.py",
+      "scripts/check_admission.py",
+      "admission-coverage.ini"
+    ],
+    "acceptance": [
+      "fontes e testes exclusivos worker-ask",
+      "sem credenciais e dados de runtime",
+      "mesmo comportamento em raiz isolada",
+      "fontes ativas unificadas",
+      "commit e push em repositorio privado proprio",
+      "todos wrappers existentes no mesmo repositorio",
+      "instalacao repetivel com backup e rollback",
+      "nenhuma credencial ou sessao migrada ao Git",
+      "admissao nao conta helpers do mesmo grupo como workers extras",
+      "workers em grupos independentes continuam consumindo vagas"
+    ]
+  },
+  "checks": {
+    "unit": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "/usr/bin/python3",
+          "-m",
+          "pytest",
+          "-q"
+        ],
+        [
+          "/usr/bin/python3",
+          "-c",
+          "import subprocess; raise SystemExit(subprocess.call([\"/usr/bin/python3\",\"-m\",\"pytest\",\"-q\"], cwd=\"adapters/zcode\"))"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    },
+    "gherkin": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/",
+          "-k",
+          "given_75_then_fallback or launcher_diagnostic_stops"
+        ],
+        [
+          "python3",
+          "adapters/zcode/scripts/validate_auth.py",
+          "gherkin"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    },
+    "quality": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "ruff",
+          "check",
+          "."
+        ],
+        [
+          "gitleaks",
+          "dir",
+          ".",
+          "--no-banner",
+          "--redact",
+          "--report-format",
+          "json",
+          "--report-path",
+          "out/secrets.json"
+        ],
+        [
+          "python3",
+          "-c",
+          "import subprocess;from pathlib import Path;names=[\"codex-ask\",\"claude-ask\",\"muse-ask\",\"opencode-ask\",\"bonsai-ask\",\"zcode-cli\",\"ask-doctor\",\"ask-check\"];[subprocess.run([\"bash\",\"-n\",str(Path(\"bin\")/n)],check=True) for n in names]"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    },
+    "metrics": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "-c",
+          "from pathlib import Path;files=list(Path(\"adapters/zcode/src\").rglob(\"*.py\"));print({\"zcode_modules\":len(files),\"router_bytes\":Path(\"worker_router.py\").stat().st_size});assert len(files)==6"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    },
+    "mutation": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "python3",
+          "scripts/check_router_mutation.py"
+        ],
+        [
+          "python3",
+          "adapters/zcode/scripts/validate_auth.py",
+          "mutation"
+        ],
+        [
+          "python3",
+          "scripts/check_install_mutation.py"
+        ],
+        [
+          "python3",
+          "scripts/check_admission.py",
+          "mutation"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version.",
+      "thresholds": {
+        "mutation_score_pct": 80
+      }
+    },
+    "coverage": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "COVERAGE_RCFILE=coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "erase"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "run",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_worker_router.py",
+          "tests/test_install.py"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "combine"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "json",
+          "-o",
+          "out/coverage.json"
+        ],
+        [
+          "python3",
+          "scripts/export_metrics.py",
+          "coverage",
+          "--root",
+          "out",
+          "--coverage-json",
+          "out/coverage.json",
+          "--module",
+          "worker_router.py"
+        ],
+        [
+          "python3",
+          "scripts/export_metrics.py",
+          "coverage",
+          "--root",
+          "out-installer",
+          "--coverage-json",
+          "out/coverage.json",
+          "--module",
+          "scripts/install.py"
+        ],
+        [
+          "python3",
+          "adapters/zcode/scripts/validate_auth.py",
+          "coverage"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=admission-coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "erase"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=admission-coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "run",
+          "-m",
+          "pytest",
+          "-q",
+          "adapters/zcode/tests/test_cli_admission.py"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=admission-coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "combine"
+        ],
+        [
+          "env",
+          "COVERAGE_RCFILE=admission-coverage.ini",
+          "python3",
+          "-m",
+          "coverage",
+          "json",
+          "-o",
+          "out-admission/coverage.json"
+        ],
+        [
+          "python3",
+          "scripts/check_admission.py",
+          "coverage"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version.",
+      "thresholds": {
+        "coverage_line_pct": 85,
+        "coverage_branch_pct": 75
+      }
+    },
+    "acceptance": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/",
+          "-k",
+          "launcher or argv_modes_are_explicit or every_orchestrator"
+        ],
+        [
+          "python3",
+          "adapters/zcode/scripts/validate_auth.py",
+          "acceptance"
+        ],
+        [
+          "/usr/bin/python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_install.py",
+          "tests/test_muse_wrapper.py",
+          "tests/test_opencode.py",
+          "tests/test_wrappers.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    },
+    "qa": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/",
+          "-k",
+          "launcher or rc_no_fallback or partial_write or snapshot"
+        ],
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "PYTHONPATH=adapters/zcode/src:adapters/zcode",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "adapters/zcode/tests/test_effects.py"
+        ],
+        [
+          "/usr/bin/python3",
+          "-m",
+          "pytest",
+          "-q",
+          "adapters/bonsai/tests"
+        ],
+        [
+          "/usr/bin/python3",
+          "-m",
+          "pytest",
+          "-q",
+          "adapters/zcode/tests/test_cli_admission.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    },
+    "e2e": {
+      "applicable": true,
+      "status": "NOT_RUN",
+      "commands": [
+        [
+          "env",
+          "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+          "python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/",
+          "-k",
+          "literal_input or 75_then_fallback or launcher_diagnostic_stops"
+        ],
+        [
+          "python3",
+          "adapters/zcode/scripts/validate_auth.py",
+          "e2e"
+        ],
+        [
+          "/usr/bin/python3",
+          "-m",
+          "pytest",
+          "-q",
+          "tests/test_install.py",
+          "tests/test_wrappers.py",
+          "tests/test_muse_wrapper.py"
+        ]
+      ],
+      "command_results": [],
+      "evidence": [],
+      "reason": "Suite isolada e CLI sintetica; sem acesso a contas nos testes. ZCode exige bundle instalado para CAS nativo e --version."
+    }
+  },
+  "metrics": {
+    "unit_pass_rate": null,
+    "gherkin_pass_rate": null,
+    "acceptance_pass_rate": null,
+    "qa_pass_rate": null,
+    "e2e_pass_rate": null,
+    "coverage_line_pct": null,
+    "coverage_branch_pct": null,
+    "mutation_score_pct": null
+  }
+}

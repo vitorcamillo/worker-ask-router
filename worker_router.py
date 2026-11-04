@@ -1,0 +1,1364 @@
+#!/usr/bin/env python3
+"""Roteador CLI unico de workers (stdlib)."""
+
+import argparse
+import contextlib
+from datetime import datetime, timezone
+import fcntl
+import hashlib
+import json
+import math
+import os
+import signal
+import shutil
+import stat as statmod
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+from quota_reset import MAX_RESET_SECONDS, MARKER, marker_reset
+
+SCHEMA_VERSION = 1
+TTL_SECONDS = 60.0
+MAX_INPUT_BYTES = 64 * 1024
+MAX_OUTPUT_BYTES = 1 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+MAX_ALLOWED_FILES = 128
+CACHE_KEYS = ("zcode-worker", "codex-terra", "muse-ask", "opencode-ask", "codex-ask", "claude-ask")
+ORCHESTRATORS = ("codex", "claude", "zcode", "muse", "opencode")
+TIMEOUT_DIRECTIVE = "worker-ask: execucao interrompida por timeout; nao indica cota nem informa data de liberacao. Revise o estado da tarefa antes de uma nova tentativa."
+DEFAULT_MIN_TIMEOUT = 300.0
+TIMEOUT_COOLDOWN_SECONDS = 300.0
+
+_CURRENT_PROC = None
+_INTERRUPTED = False
+# Log JSONL de execucoes (runs.jsonl): uma linha por execucao que chega a cadeia.
+# Nunca recebe prompt, spec, stdout ou stderr dos workers, so metricas.
+_RUN = None
+_RUN_T0 = None
+_RUN_WRITTEN = False
+RUNS_LOG_MAX_BYTES = 5 * 1024 * 1024
+_LOG_FD = None
+_LOG_FAILED = False
+_LOG_REPORTED = False
+_LOG_ENDS_WITH_NEWLINE = True
+_EVENT_FD = None
+_EVENT_FD_READY = False
+_USAGE_KEYS = ("session", "model", "effort", "input", "output", "cacheRead", "cacheWrite")
+
+
+def _write_all(fd, data):
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("escrita no log sem progresso")
+        view = view[written:]
+
+
+def _log_write(data):
+    global _LOG_FAILED, _LOG_ENDS_WITH_NEWLINE
+    if _LOG_FD is None:
+        return True
+    try:
+        _write_all(_LOG_FD, data)
+        if data:
+            _LOG_ENDS_WITH_NEWLINE = data.endswith(b"\n")
+        return True
+    except OSError:
+        _LOG_FAILED = True
+        return False
+
+
+def _log_exit(rc):
+    if _LOG_FD is not None and not _LOG_ENDS_WITH_NEWLINE:
+        _log_write(b"\n")
+    _log_write(f"exit={rc}\n".encode())
+
+
+def _note_log_failure():
+    global _LOG_REPORTED
+    if _LOG_REPORTED:
+        return
+    _LOG_REPORTED = True
+    try:
+        sys.stderr.write("erro: falha ao gravar --log; registro incompleto\n")
+        sys.stderr.flush()
+    except OSError:
+        pass
+
+
+def _err(msg):
+    text = str(msg).rstrip("\n") + "\n"
+    sys.stderr.write(text)
+    sys.stderr.flush()
+    _log_write(text.encode("utf-8", "replace"))
+
+
+def _open_log(path):
+    """Abre --log como `>`: arquivo regular, sem symlink final, modo 0600."""
+    global _LOG_ENDS_WITH_NEWLINE
+    if not path or any(ord(ch) < 32 for ch in path) or _is_sensitive(os.path.basename(path)):
+        raise RuntimeError("caminho de --log recusado")
+    try:
+        fd = _open_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        raise RuntimeError("nao foi possivel abrir --log")
+    if not _is_regular_fd(fd):
+        os.close(fd)
+        raise RuntimeError("--log deve ser arquivo regular")
+    os.set_blocking(fd, True)
+    # Arquivo preexistente não herda o modo da criação; fecha em 0600 antes de gravar.
+    os.fchmod(fd, 0o600)
+    os.ftruncate(fd, 0)
+    _LOG_ENDS_WITH_NEWLINE = True
+    return fd
+
+
+def _event_fd():
+    """Canal de eventos da apresentação: `fd:inode` de um pipe herdado."""
+    global _EVENT_FD, _EVENT_FD_READY
+    if _EVENT_FD_READY:
+        return _EVENT_FD
+    _EVENT_FD_READY = True
+    fd_s, _, ino_s = os.environ.get("ASK_PRESENTATION_FD", "").partition(":")
+    if fd_s.isdigit() and ino_s.isdigit():
+        try:
+            st = os.fstat(int(fd_s))
+            if statmod.S_ISFIFO(st.st_mode) and st.st_ino == int(ino_s):
+                os.set_blocking(int(fd_s), False)
+                _EVENT_FD = int(fd_s)
+        except OSError:
+            pass
+    return _EVENT_FD
+
+
+def _event(kind, legacy=None, **data):
+    """Evento estruturado para a apresentação; sem canal, mantém a linha antiga."""
+    if _RUN is not None and kind != "executor_start":
+        # Métrica do runs.jsonl: registra antes de qualquer retorno interno.
+        # "executor_start" duplica o "start" de _emit_executor_start; vai só ao canal.
+        try:
+            entry = {"event": kind, "t": round(time.monotonic() - _RUN_T0, 3)}
+            for key in ("executor", "reason", "rc", "detail"):
+                if data.get(key) is not None:
+                    entry[key] = data[key]
+            _RUN["attempts"].append(entry)
+        except Exception:
+            pass
+    fd = _event_fd()
+    if fd is not None:
+        payload = {"event": kind, **{k: v for k, v in data.items() if v is not None}}
+        try:
+            os.write(fd, (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            return
+        except OSError:
+            pass
+    if legacy:
+        _err(legacy)
+
+
+def _parse_usage(stdout_data):
+    """Lê o rodapé `--- nome: k=v ... ---` do fim da resposta, sem alterá-la."""
+    tail = stdout_data[-4096:].decode("utf-8", "replace")
+    for line in reversed(tail.splitlines()):
+        line = line.strip()
+        if line.startswith("--- ") and line.endswith(" ---") and ": " in line:
+            out = {}
+            for token in line[4:-4].split(": ", 1)[1].split():
+                key, sep, value = token.partition("=")
+                if sep and key in _USAGE_KEYS and value and value != "n/d" and len(value) <= 64 and value.isprintable():
+                    out[key] = value
+            return out
+    return {}
+
+
+def _parse_run_usage(stdout_data):
+    """Tokens para o runs.jsonl a partir do mesmo rodapé lido por `_parse_usage`."""
+    out = _parse_usage(stdout_data)
+    tail = stdout_data[-4096:].decode("utf-8", "replace")
+    for line in reversed(tail.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("--- ") and stripped.endswith(" ---") and ": " in stripped:
+            for token in stripped[4:-4].split(": ", 1)[1].split():
+                key, sep, value = token.partition("=")
+                if not sep or not value:
+                    continue
+                if key == "tokens":
+                    for part in value.split("/"):
+                        sub, colon, num = part.partition(":")
+                        if not colon:
+                            continue
+                        try:
+                            number = int(num) if num.isdigit() else None
+                        except ValueError:
+                            continue
+                        if number is None:
+                            continue
+                        if sub == "in" and "input" not in out:
+                            out["input"] = number
+                        elif sub == "out" and "output" not in out:
+                            out["output"] = number
+                elif key == "custo" and "cost_usd" not in out:
+                    raw = value[1:] if value.startswith("$") else value
+                    try:
+                        cost = float(raw)
+                    except ValueError:
+                        continue
+                    if math.isfinite(cost) and cost >= 0:
+                        out["cost_usd"] = cost
+                elif key == "modelo" and "model" not in out:
+                    if value != "n/d" and len(value) <= 64 and value.isprintable():
+                        out["model"] = value
+            break
+    for field in ("input", "output", "cacheRead", "cacheWrite"):
+        if isinstance(out.get(field), str) and out[field].isdigit():
+            try:
+                out[field] = int(out[field])
+            except ValueError:
+                pass
+    return out
+
+
+def _exit_timeout(legacy, executor=None, detail="timeout"):
+    _event("stop", legacy, executor=executor, rc=124, detail=detail)
+    _err(TIMEOUT_DIRECTIVE)
+    sys.exit(124)
+
+
+def _min_timeout():
+    raw = os.environ.get("WORKER_ASK_MIN_TIMEOUT")
+    if raw is None:
+        return DEFAULT_MIN_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_MIN_TIMEOUT
+    if not math.isfinite(value) or value < 0:
+        return DEFAULT_MIN_TIMEOUT
+    return value
+
+
+_EXECUTOR_LABELS = {
+    "zcode-worker": "ZCode",
+    "codex-terra": "Codex Terra",
+    "muse-ask": "Muse",
+    "opencode-ask": "OpenCode",
+    "codex-ask": "Codex",
+    "claude-ask": "Claude",
+}
+
+# codex-terra nao tem binario proprio: e o codex-ask fixado em gpt-6.1-terra medium.
+WRAPPER_BINARIES = {"codex-terra": "codex-ask"}
+
+
+def _emit_executor_start(name, mode, model=None):
+    if _RUN is not None:
+        # Métrica do runs.jsonl: inicio de cada executor tentado.
+        try:
+            start_entry = {"event": "start", "t": round(time.monotonic() - _RUN_T0, 3),
+                           "executor": name}
+            if model is not None:
+                start_entry["model"] = model
+            _RUN["attempts"].append(start_entry)
+            # Interrupcao antes da coleta nao herda metricas da tentativa anterior.
+            _RUN["executor"] = name
+            for key in ("usage", "output_bytes", "changed_files"):
+                _RUN.pop(key, None)
+        except Exception:
+            pass
+    if _event_fd() is not None:
+        _event("executor_start", None, executor=name, mode=mode, model=model)
+        return
+    if os.environ.get("ASK_PRESENTATION", "").lower() == "off":
+        return
+    label = _EXECUTOR_LABELS.get(name, name)
+    if os.environ.get("ASK_PRESENTATION", "").lower() == "json":
+        _err(json.dumps({
+            "event": "executor_start",
+            "provider": "worker-ask",
+            "executor": label,
+            "mode": mode,
+            "message": "Em execução",
+        }, ensure_ascii=False))
+    else:
+        _err(f"  ↳ {label} · Em execução")
+
+
+def _record_run_metrics(name, stdout_data, allowed, cwd, snap_before):
+    """Metricas do runs.jsonl da ultima tentativa, no sucesso e na falha.
+
+    Chamada tambem nos caminhos de falha (rc!=0, rc75, timeout, interrupcao
+    rc143/144) para nao perder executor/tokens/custo/arquivos alterados; falha de
+    snapshot vira null e metricas de tentativa anterior sao substituidas. Nunca
+    muda o rc nem o fluxo.
+    """
+    if _RUN is None:
+        return
+    try:
+        run_usage = _parse_run_usage(stdout_data)
+        if run_usage:
+            _RUN["usage"] = run_usage
+        else:
+            _RUN.pop("usage", None)
+        _RUN["executor"] = name
+        _RUN["output_bytes"] = len(stdout_data)
+        if allowed:
+            try:
+                snap_after = snapshot_allowed(cwd, allowed)
+                before = snap_before or {}
+                _RUN["changed_files"] = sum(
+                    1 for rel in allowed if snap_after.get(rel) != before.get(rel))
+            except Exception:
+                _RUN["changed_files"] = None
+    except Exception:
+        pass
+
+
+def _state_dir():
+    base = os.environ.get("XDG_STATE_HOME")
+    if base:
+        return Path(base) / "worker-ask"
+    return Path.home() / ".local" / "state" / "worker-ask"
+
+
+def ensure_state_dir(create=True):
+    sd = _state_dir()
+    if sd.is_symlink():
+        raise RuntimeError("recusado: diretorio de estado eh symlink")
+    if sd.exists():
+        if not sd.is_dir():
+            raise RuntimeError("recusado: nao eh diretorio")
+    else:
+        if not create:
+            return sd
+        sd.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if sd.is_symlink() or not sd.is_dir():
+            raise RuntimeError("recusado: diretorio de estado invalido")
+    try:
+        os.chmod(sd, 0o700)
+    except OSError:
+        raise RuntimeError("falha ao ajustar permissoes do estado")
+    return sd
+
+
+def _open_nofollow(path, flags, mode=0o600):
+    return os.open(str(path), flags | getattr(os, "O_NOFOLLOW", 0), mode)
+
+
+def _is_regular_fd(fd):
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        return False
+    return statmod.S_ISREG(st.st_mode)
+
+
+def _read_bounded_file(path, limit):
+    # returns bytes
+    fd = _open_nofollow(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    try:
+        st = os.fstat(fd)
+        if not statmod.S_ISREG(st.st_mode):
+            raise RuntimeError("arquivo nao regular")
+        chunks = []
+        total = 0
+        while True:
+            data = os.read(fd, 65536)
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+            if total > limit + 1:
+                break
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def _valid_until(value, now):
+    if isinstance(value, bool):
+        return False
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        if not math.isfinite(value):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if value < 0 or value > now + MAX_RESET_SECONDS + 1:
+        return False
+    return True
+
+
+def _cache_entry(key, value, now):
+    if not isinstance(value, dict) or value.get("wrapper") != key:
+        return None
+    until = value.get("until")
+    if until is None and value.get("reset_known") is False:
+        if value.get("blocked_reason") == "timeout":
+            return None
+        entry = {"wrapper": key, "until": None, "reset_known": False, "blocked_reason": "quota"}
+    elif _valid_until(until, now) and until > now:
+        entry = {"wrapper": key, "until": float(until), "reset_known": value.get("reset_known") is True}
+        if value.get("blocked_reason") == "timeout":
+            entry["blocked_reason"] = "timeout"
+    else:
+        return None
+    generation = value.get("generation")
+    if isinstance(generation, str) and len(generation) == 32 and all(c in "0123456789abcdef" for c in generation):
+        entry["generation"] = generation
+    return entry
+
+
+def load_cache(create_dir=False):
+    sd = _state_dir()
+    if sd.is_symlink():
+        raise RuntimeError("recusado: diretorio de estado eh symlink")
+    cp = sd / "cache.json"
+    if cp.is_symlink():
+        raise RuntimeError("recusado: cache eh symlink")
+    if not sd.exists() or not cp.exists():
+        return {}
+    now = time.time()
+    try:
+        fd = _open_nofollow(cp, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        raise RuntimeError("falha de I/O ao ler cache")
+    try:
+        if not _is_regular_fd(fd):
+            raise RuntimeError("cache invalido")
+        raw = os.read(fd, 64 * 1024 + 1)
+        if len(raw) > 64 * 1024:
+            _err("aviso: cache invalido, tratado como vazio")
+            return {}
+    except RuntimeError:
+        raise
+    except OSError:
+        raise RuntimeError("falha de I/O ao ler cache")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    # reopen not needed; raw already read. But fd closed. parse.
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        _err("aviso: cache invalido, tratado como vazio")
+        return {}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        _err("aviso: cache corrompido, tratado como vazio")
+        return {}
+    if not isinstance(data, dict):
+        _err("aviso: cache invalido, tratado como vazio")
+        return {}
+    out = {}
+    for k in CACHE_KEYS:
+        v = data.get(k)
+        entry = _cache_entry(k, v, now)
+        if entry:
+            out[k] = entry
+    return out
+
+
+def save_cache(updates, clear=()):
+    sd = ensure_state_dir(create=True)
+    cp = sd / "cache.json"
+    lp = sd / "lock"
+    if sd.is_symlink() or cp.is_symlink() or lp.is_symlink():
+        raise RuntimeError("recusado: symlink em arquivo de estado")
+    # open lock nonblock
+    try:
+        fd = _open_nofollow(lp, os.O_CREAT | os.O_RDWR | getattr(os, "O_NONBLOCK", 0), 0o600)
+    except OSError:
+        raise RuntimeError("falha de I/O no lock")
+    try:
+        if not _is_regular_fd(fd):
+            raise RuntimeError("lock invalido")
+        # bounded flock
+        deadline_lock = time.monotonic() + 0.5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except (BlockingIOError, OSError):
+                if time.monotonic() >= deadline_lock:
+                    raise RuntimeError("timeout ao adquirir lock")
+                time.sleep(0.05)
+        try:
+            # read current
+            current = {}
+            if cp.exists() and not cp.is_symlink():
+                try:
+                    raw = _read_bounded_file(cp, 64 * 1024)
+                    if len(raw) <= 64 * 1024:
+                        d = json.loads(raw.decode("utf-8"))
+                        if isinstance(d, dict):
+                            current = d
+                except Exception:
+                    current = {}
+            now = time.time()
+            merged = {}
+            for k in CACHE_KEYS:
+                entry = _cache_entry(k, current.get(k), now)
+                if entry:
+                    merged[k] = entry
+            for k, v in (updates or {}).items():
+                if k not in CACHE_KEYS:
+                    continue
+                entry = _cache_entry(k, v, now)
+                if not entry:
+                    continue
+                previous = merged.get(k)
+                if previous and previous.get("blocked_reason") != "timeout" and entry.get("blocked_reason") == "timeout":
+                    previous["generation"] = uuid.uuid4().hex
+                    continue
+                if previous and previous.get("blocked_reason") != "timeout" and previous["until"] is not None and entry.get("blocked_reason") != "timeout" and (entry["until"] is None or previous["until"] > entry["until"]):
+                    previous["generation"] = uuid.uuid4().hex
+                    continue
+                entry["generation"] = uuid.uuid4().hex
+                merged[k] = entry
+            for key, expected in dict(clear).items():
+                if merged.get(key) == expected:
+                    merged.pop(key, None)
+            # expunge expired/extras already by construction
+            tmp_fd, tmp_path = tempfile.mkstemp(dir=str(sd), prefix=".cache-")
+            try:
+                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                    json.dump(merged, f)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(tmp_path, 0o600)
+                os.replace(tmp_path, cp)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise RuntimeError("falha ao escrever cache")
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _write_run(rc):
+    """Grava uma linha de metrica em `<state_dir>/runs.jsonl`; nunca altera rc/stdout/--log."""
+    global _RUN_WRITTEN
+    if _RUN_WRITTEN:
+        return
+    _RUN_WRITTEN = True
+    run = _RUN
+    if run is None:
+        return
+    if os.environ.get("WORKER_ASK_RUNS_LOG") == "0":
+        return
+    try:
+        run["rc"] = rc
+        try:
+            run["duration_s"] = round(time.monotonic() - _RUN_T0, 3)
+        except Exception:
+            run["duration_s"] = 0.0
+        serial = {k: v for k, v in run.items() if not k.startswith("_")}
+        sd = ensure_state_dir(create=True)
+        rp = sd / "runs.jsonl"
+        bp = sd / "runs.jsonl.1"
+        if rp.is_symlink():
+            raise RuntimeError("recusado: runs.jsonl eh symlink")
+        fd = None
+        fd = _open_nofollow(rp, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0), 0o600)
+        try:
+            if not _is_regular_fd(fd):
+                raise RuntimeError("runs.jsonl invalido")
+
+            def _lock_or_none(target):
+                deadline = time.monotonic() + 0.5
+                while True:
+                    try:
+                        fcntl.flock(target, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+                    except (BlockingIOError, OSError):
+                        if time.monotonic() >= deadline:
+                            return False
+                        time.sleep(0.05)
+
+            if not _lock_or_none(fd):
+                return
+            try:
+                for _attempt in range(3):
+                    if rp.is_symlink():
+                        raise RuntimeError("recusado: runs.jsonl eh symlink")
+                    try:
+                        st_path = os.stat(rp, follow_symlinks=False)
+                    except FileNotFoundError:
+                        st_path = None
+                    except OSError:
+                        raise RuntimeError("falha de I/O em runs.jsonl")
+                    try:
+                        st_fd = os.fstat(fd)
+                    except OSError:
+                        raise RuntimeError("falha de I/O em runs.jsonl")
+                    if st_path is None or (st_path.st_ino, st_path.st_dev) != (st_fd.st_ino, st_fd.st_dev):
+                        try:
+                            fcntl.flock(fd, fcntl.LOCK_UN)
+                        except OSError:
+                            pass
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        fd = None
+                        if _attempt >= 2:
+                            return
+                        fd = _open_nofollow(rp, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0), 0o600)
+                        if not _is_regular_fd(fd):
+                            raise RuntimeError("runs.jsonl invalido")
+                        if not _lock_or_none(fd):
+                            return
+                        continue
+                    break
+                try:
+                    size = os.fstat(fd).st_size
+                except OSError:
+                    raise RuntimeError("falha de I/O em runs.jsonl")
+                if size > RUNS_LOG_MAX_BYTES:
+                    # Rotacao com o fd ainda aberto e travado; recusa symlink nos dois.
+                    if rp.is_symlink() or bp.is_symlink():
+                        raise RuntimeError("recusado: symlink em arquivo de execucoes")
+                    os.replace(str(rp), str(bp))
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    fd = None
+                    fd = _open_nofollow(rp, os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_NONBLOCK", 0), 0o600)
+                    if not _is_regular_fd(fd):
+                        raise RuntimeError("runs.jsonl invalido")
+                    if not _lock_or_none(fd):
+                        return
+                try:
+                    os.fchmod(fd, 0o600)
+                except OSError:
+                    pass
+                line = (json.dumps(serial, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+                _write_all(fd, line)
+            finally:
+                if fd is not None:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    except Exception:
+        try:
+            sys.stderr.write("aviso: falha ao gravar runs.jsonl\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
+        return
+
+
+def _is_sensitive(name):
+    low = str(name).lower()
+    if low in (".ssh", ".aws", "credentials", "credential"):
+        return True
+    if low == ".env" or low.startswith(".env."):
+        return True
+    if low == "auth.json":
+        return True
+    if low.endswith(".pem") or low.endswith(".key"):
+        return True
+    if "cred" in low:
+        return True
+    if low in ("id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"):
+        return True
+    return False
+
+
+def validate_allowed_file(cwd, rel):
+    if not isinstance(rel, str) or not rel:
+        raise ValueError("allowed-file invalido")
+    # control chars
+    for ch in rel:
+        if ord(ch) < 32 or ord(ch) == 127:
+            raise ValueError("allowed-file com caractere de controle")
+    if rel.startswith("/") or "\\" in rel:
+        raise ValueError("allowed-file deve ser relativo sem separador de OS")
+    parts = rel.split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        raise ValueError("allowed-file com componente invalido")
+    for part in parts:
+        if _is_sensitive(part):
+            raise ValueError("allowed-file sensivel recusado")
+    # ancestors symlink check
+    cur = Path(cwd)
+    for p in parts[:-1]:
+        cur = cur / p
+        if cur.is_symlink():
+            raise ValueError("allowed-file com symlink em ancestral")
+    return rel
+
+
+def _snapshot_one(cwd, rel):
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in rel):
+        raise RuntimeError("snapshot: caminho invalido")
+    parts = rel.split("/")
+    for part in parts:
+        if _is_sensitive(part):
+            raise RuntimeError("snapshot: caminho sensivel recusado")
+    # ancestors revalidate
+    cur = Path(cwd)
+    for p in parts[:-1]:
+        cur = cur / p
+        if cur.is_symlink():
+            raise RuntimeError("snapshot: symlink em ancestral")
+    full = os.path.join(cwd, rel)
+    try:
+        fd = os.open(full, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        return (False, "ABSENT", 0)
+    except OSError:
+        raise RuntimeError("snapshot: falha de I/O")
+    try:
+        st = os.fstat(fd)
+        if statmod.S_ISLNK(st.st_mode):
+            raise RuntimeError("snapshot: symlink recusado")
+        if not statmod.S_ISREG(st.st_mode):
+            raise RuntimeError("snapshot: arquivo especial recusado")
+        if st.st_size > MAX_SNAPSHOT_BYTES:
+            raise RuntimeError("snapshot: arquivo muito grande")
+        h = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_SNAPSHOT_BYTES:
+                raise RuntimeError("snapshot: arquivo muito grande")
+            h.update(chunk)
+        mode = statmod.S_IMODE(st.st_mode)
+        return (True, h.hexdigest(), mode)
+    except RuntimeError:
+        raise
+    except OSError:
+        raise RuntimeError("snapshot: falha de I/O")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def snapshot_allowed(cwd, allowed):
+    out = {}
+    for rel in allowed:
+        out[rel] = _snapshot_one(cwd, rel)
+    return out
+
+
+def _kill_group(proc, sig):
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def _terminate_group(proc):
+    try:
+        os.killpg(proc.pid, 0)
+    except ProcessLookupError:
+        proc.wait()
+        return
+    _kill_group(proc, signal.SIGTERM)
+    grace_deadline = time.monotonic() + 0.2
+    while time.monotonic() < grace_deadline:
+        time.sleep(0.05)
+    _kill_group(proc, signal.SIGKILL)
+    try:
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.wait(timeout=1)
+        except Exception:
+            pass
+
+
+def _safe_failure_marker(stderr_data):
+    # Somente diagnóstico: não prova ausência de efeitos nem autoriza fallback.
+    message = b"ERRO: launcher de autenticacao incompativel com o bundle do ZCode"
+    warning = b" Arquivos podem ter sido alterados; revise o diff antes de tentar novamente."
+    if any(line in (message, message + warning) for line in stderr_data.splitlines()):
+        return b"launcher_incompatible"
+    if any(line.startswith(b"ERRO: fila de admiss") and b"nenhum worker iniciado" in line for line in stderr_data.splitlines()):
+        return b"admission_busy"
+    reset = marker_reset(stderr_data)
+    return (MARKER + str(reset)).encode() if reset is not None else b""
+
+
+def run_wrapper(argv, cwd, prompt_bytes, timeout):
+    global _CURRENT_PROC
+    deadline = time.monotonic() + timeout
+    env = {k: v for k, v in os.environ.items() if k not in ("MUSE_ASK_MODEL", "MUSE_ASK_EFFORT", "ASK_PRESENTATION_FD")}
+    env["WORKER_ASK_ACTIVE"] = "1"
+    env["WORKER_ASK_QUOTA_HELPER"] = str(Path(__file__).resolve().with_name("quota_reset.py"))
+    with contextlib.ExitStack() as stack:
+        stdin_tmp, stdout_tmp, stderr_tmp = [
+            stack.enter_context(tempfile.TemporaryFile()) for _ in range(3)
+        ]
+        stdin_tmp.write(prompt_bytes)
+        stdin_tmp.seek(0)
+        proc = subprocess.Popen(argv, stdin=stdin_tmp, stdout=stdout_tmp,
+                                stderr=stderr_tmp, cwd=cwd, start_new_session=True, env=env)
+        _CURRENT_PROC = proc
+        timed_out = False
+        try:
+            while proc.poll() is None:
+                overflow = any(os.fstat(f.fileno()).st_size > MAX_OUTPUT_BYTES
+                               for f in (stdout_tmp, stderr_tmp))
+                timed_out = time.monotonic() >= deadline
+                if overflow or timed_out:
+                    _terminate_group(proc)
+                    break
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+            overflow = any(os.fstat(f.fileno()).st_size > MAX_OUTPUT_BYTES
+                           for f in (stdout_tmp, stderr_tmp))
+            if overflow:
+                _terminate_group(proc)
+                _err("erro: output excedeu limite")
+                return 1, b"", b"", timed_out
+            stdout_tmp.seek(0)
+            stdout_data = stdout_tmp.read(MAX_OUTPUT_BYTES + 1)
+            if len(stdout_data) > MAX_OUTPUT_BYTES:
+                return 1, b"", b"", timed_out
+            rc = proc.returncode
+            stderr_tmp.seek(0)
+            marker = _safe_failure_marker(stderr_tmp.read(MAX_OUTPUT_BYTES + 1))
+            return (128 - rc if rc < 0 else rc), stdout_data, marker, timed_out
+        finally:
+            # Also terminate children left behind when a wrapper exits early.
+            _terminate_group(proc)
+            _CURRENT_PROC = None
+
+
+def muse_opted_out(cwd):
+    if os.environ.get("WORKER_ASK_NO_MUSE") == "1":
+        return True
+    try:
+        cur = os.path.abspath(cwd)
+    except OSError:
+        return False
+    while True:
+        try:
+            if os.path.isfile(os.path.join(cur, ".worker-ask-no-muse")):
+                return True
+        except OSError:
+            pass
+        try:
+            has_git = os.path.exists(os.path.join(cur, ".git"))
+        except OSError:
+            has_git = False
+        if has_git:
+            return False
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
+def wrapper_chain(orchestrator, allow_muse, mode):
+    # A plataforma do orquestrador nao restringe o worker; recursao tem trava propria.
+    chain = [("zcode-worker", "zcode")]
+    if allow_muse:
+        chain.append(("muse-ask", "muse"))
+    chain.extend([("opencode-ask", "opencode"), ("codex-ask", "codex"),
+                  ("claude-ask", "claude")])
+    return chain
+
+
+def build_argv(name, path, mode, cwd):
+    cwd_abs = os.path.abspath(cwd)
+    if name == "zcode-worker":
+        m = "edit" if mode == "write" else "plan"
+        return [path, "--mode", m, "--model", "glm-5.3-flash", "--effort", "high", "--cwd", cwd_abs]
+    if name == "muse-ask":
+        return [path, "--mode", mode, "--model", "muse-spark-1.3-contributor", "--effort", "high", "--cwd", cwd_abs]
+    if name == "opencode-ask":
+        return [path, "--mode", mode, "--model", "auto", "--effort", "high", "--cwd", cwd_abs]
+    if name == "codex-terra":
+        m = "write" if mode == "write" else "plan"
+        return [path, "--mode", m, "--model", "gpt-6.1-terra", "--effort", "medium", "--cwd", cwd_abs]
+    if name == "codex-ask":
+        m = "write" if mode == "write" else "plan"
+        return [path, "--mode", m, "--cwd", cwd_abs]
+    if name == "claude-ask":
+        return [path, "--mode", mode, "--model", "haiku", "--cwd", cwd_abs]
+    return [path, "--cwd", cwd_abs]
+
+
+def _main_impl(argv=None):
+    global _LOG_FD
+    parser = argparse.ArgumentParser(prog="worker-ask")
+    parser.add_argument("--cwd")
+    parser.add_argument("--mode", choices=["plan", "write"], default="write")
+    parser.add_argument("--spec")
+    parser.add_argument("prompt", nargs="?")
+    parser.add_argument("--timeout", type=float, default=1800.0)
+    parser.add_argument("--step-timeout", type=float, default=900.0)
+    parser.add_argument("--allow-muse", action="store_true", help="obsoleto: Muse ja e padrao")
+    parser.add_argument("--no-muse", action="store_true")
+    parser.add_argument("--orchestrator", choices=list(ORCHESTRATORS))
+    parser.add_argument("--status", action="store_true")
+    parser.add_argument("--retry-exhausted", action="store_true")
+    parser.add_argument("--allowed-file", action="append", default=[])
+    parser.add_argument("--log", help="grava stdout+stderr e a linha final exit=N neste arquivo")
+    # --help sai dentro de parse_args, antes da abertura normal do --log:
+    # abre o log antes e registra o texto de ajuda nele.
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    pre_dashdash = raw_argv[: raw_argv.index("--")] if "--" in raw_argv else raw_argv
+    if any(arg in ("-h", "--help") or (len(arg) >= 4 and "--help".startswith(arg)) for arg in pre_dashdash):
+        help_log = None
+        for index, arg in enumerate(pre_dashdash):
+            if arg == "--log":
+                if index + 1 < len(pre_dashdash) and not pre_dashdash[index + 1].startswith("-"):
+                    help_log = pre_dashdash[index + 1]
+                else:
+                    help_log = None
+            elif arg.startswith("--log="):
+                help_log = arg.partition("=")[2]
+        if help_log is not None:
+            if _LOG_FD is None:
+                try:
+                    _LOG_FD = _open_log(help_log)
+                except (RuntimeError, OSError) as e:
+                    _err(f"erro: {e}")
+                    sys.exit(2)
+            help_text = parser.format_help()
+            sys.stdout.write(help_text)
+            if not _log_write(help_text.encode("utf-8", "replace")):
+                _note_log_failure()
+                sys.exit(1)
+            sys.exit(0)
+    args = parser.parse_args(argv)
+
+    if args.log is not None and _LOG_FD is None:
+        try:
+            _LOG_FD = _open_log(args.log)
+        except (RuntimeError, OSError) as e:
+            _err(f"erro: {e}")
+            sys.exit(2)
+
+    # status: no prompt reading
+    if args.status:
+        try:
+            cache = load_cache(create_dir=False)
+        except RuntimeError as e:
+            _err(str(e))
+            sys.exit(1)
+        now = time.time()
+        snap = {}
+        for k in CACHE_KEYS:
+            v = cache.get(k)
+            if v:
+                remaining = max(0, v["until"] - now) if v["until"] is not None else None
+                snap[k] = {**v, "ttl_remaining": remaining}
+        out = {"state_dir": str(_state_dir()), "cache": snap}
+        status_text = json.dumps(out) + "\n"
+        sys.stdout.write(status_text)
+        if not _log_write(status_text.encode("utf-8", "replace")):
+            _note_log_failure()
+            sys.exit(1)
+        sys.exit(0)
+
+    if os.environ.get("WORKER_ASK_ACTIVE") == "1":
+        _err("erro: delegacao recursiva de worker bloqueada")
+        sys.exit(2)
+
+    # validate timeout
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        _err("erro: --timeout deve ser float positivo finito")
+        sys.exit(2)
+    if not math.isfinite(args.step_timeout) or args.step_timeout <= 0:
+        _err("erro: --step-timeout deve ser float positivo finito")
+        sys.exit(2)
+    floor = _min_timeout()
+    if args.timeout < floor:
+        _err(f"worker-ask: --timeout {args.timeout:g}s abaixo do minimo; usando {floor:g}s")
+        args.timeout = floor
+    if args.step_timeout < floor:
+        _err(f"worker-ask: --step-timeout {args.step_timeout:g}s abaixo do minimo; usando {floor:g}s")
+        args.step_timeout = floor
+    if not args.cwd:
+        _err("erro: --cwd obrigatorio")
+        sys.exit(2)
+    cwd = os.path.realpath(args.cwd)
+    if not os.path.isdir(cwd):
+        _err("erro: --cwd deve ser diretorio valido")
+        sys.exit(2)
+    if not args.orchestrator:
+        _err("erro: --orchestrator obrigatorio")
+        sys.exit(2)
+
+    allowed = list(args.allowed_file or [])
+    if len(allowed) > MAX_ALLOWED_FILES:
+        _err("erro: excesso de --allowed-file")
+        sys.exit(2)
+    if args.mode == "write" and not allowed:
+        _err("erro: --allowed-file obrigatorio para --mode write")
+        sys.exit(2)
+    try:
+        for rel in allowed:
+            validate_allowed_file(cwd, rel)
+    except ValueError as e:
+        _err(f"erro: {e}")
+        sys.exit(2)
+
+    # input source
+    if args.spec is not None and args.prompt is not None:
+        _err("erro: use apenas uma fonte de prompt (--spec ou posicional)")
+        sys.exit(2)
+    prompt = None
+    if args.spec is not None:
+        try:
+            spec_path = Path(os.path.abspath(args.spec))
+            for part in spec_path.parts:
+                if _is_sensitive(part):
+                    raise RuntimeError("spec sensivel recusada")
+            if any(parent.is_symlink() for parent in (spec_path, *spec_path.parents)):
+                raise RuntimeError("symlink em spec recusado")
+            raw = _read_bounded_file(args.spec, MAX_INPUT_BYTES)
+        except RuntimeError as e:
+            _err(f"erro: nao foi possivel ler --spec: {e}")
+            sys.exit(2)
+        except OSError:
+            _err("erro: nao foi possivel ler --spec")
+            sys.exit(2)
+        if len(raw) > MAX_INPUT_BYTES:
+            _err("erro: prompt excede 64KiB")
+            sys.exit(2)
+        try:
+            prompt = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            _err("erro: prompt nao eh UTF-8 valido")
+            sys.exit(2)
+    elif args.prompt is not None:
+        prompt = args.prompt
+    else:
+        try:
+            raw = sys.stdin.buffer.read(MAX_INPUT_BYTES + 1)
+        except OSError:
+            _err("erro: nao foi possivel ler stdin")
+            sys.exit(2)
+        if len(raw) > MAX_INPUT_BYTES:
+            _err("erro: prompt excede 64KiB")
+            sys.exit(2)
+        try:
+            prompt = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            _err("erro: prompt nao eh UTF-8 valido")
+            sys.exit(2)
+
+    if not prompt:
+        _err("erro: prompt vazio")
+        sys.exit(2)
+    try:
+        prompt_bytes = prompt.encode("utf-8")
+    except UnicodeEncodeError:
+        _err("erro: prompt nao eh UTF-8 valido")
+        sys.exit(2)
+    if len(prompt_bytes) > MAX_INPUT_BYTES:
+        _err("erro: prompt excede 64KiB")
+        sys.exit(2)
+
+    # Bytes originais do usuario, antes do prefixo de --allowed-file (metrica).
+    spec_raw = bytes(prompt_bytes)
+    if allowed:
+        prefix = "[worker-router] Arquivos autorizados (relativos ao cwd): " + ", ".join(allowed) + ". Edite apenas estes; nao edite nenhum outro arquivo."
+        prompt = prefix + "\n\n" + prompt
+        prompt_bytes = prompt.encode("utf-8")
+        if len(prompt_bytes) > MAX_INPUT_BYTES:
+            _err("erro: prompt excede 64KiB apos prefixo")
+            sys.exit(2)
+
+    try:
+        cache = load_cache(create_dir=False)
+    except RuntimeError as e:
+        _err(str(e))
+        sys.exit(1)
+
+    muse_excluded = args.no_muse or muse_opted_out(cwd)
+    chain = wrapper_chain(args.orchestrator, not muse_excluded, args.mode)
+
+    global _RUN, _RUN_T0
+    _RUN = {
+        "schema": 1,
+        "run_id": uuid.uuid4().hex,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "orchestrator": args.orchestrator,
+        "mode": args.mode,
+        "cwd": cwd,
+        "spec_sha256": hashlib.sha256(spec_raw).hexdigest(),
+        "prompt_bytes": len(spec_raw),
+        "allowed_files": sorted(allowed),
+        "attempts": [],
+    }
+    _RUN_T0 = time.monotonic()
+    start = _RUN_T0
+    deadline = start + args.timeout
+    had_timeout = False
+
+    for name, orch in chain:
+        if time.monotonic() >= deadline:
+            _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
+        if not args.retry_exhausted:
+            entry = cache.get(name)
+            if entry and (entry.get("until") is None or time.time() < entry["until"]):
+                _event("skip", f"{name}: skip (cooldown)", executor=name, reason="cooldown")
+                continue
+        path = shutil.which(WRAPPER_BINARIES.get(name, name))
+        if path is None:
+            _event("skip", f"{name}: skip (wrapper ausente)", executor=name, reason="ausente")
+            continue
+
+        if name not in cache and not args.retry_exhausted:
+            from quota_provider import query_reset
+            reset = query_reset(name, budget=max(0, deadline - time.monotonic()))
+            if time.monotonic() >= deadline:
+                _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
+            if reset is not None:
+                quota_entry = {"wrapper": name, "until": reset, "reset_known": True}
+                try:
+                    save_cache({name: quota_entry})
+                except RuntimeError as e:
+                    _err(str(e))
+                    sys.exit(1)
+                cache[name] = quota_entry
+                _event("skip", f"{name}: skip (cota ate {reset:g})", executor=name, reason="cota", until=reset)
+                continue
+
+        snap_before = None
+        if allowed:
+            try:
+                snap_before = snapshot_allowed(cwd, allowed)
+            except RuntimeError:
+                _err("erro: snapshot falhou")
+                sys.exit(1)
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
+        budget = min(args.step_timeout, remaining)
+
+        argv_list = build_argv(name, path, args.mode, cwd)
+        model = argv_list[argv_list.index("--model") + 1] if "--model" in argv_list else None
+        _emit_executor_start(name, args.mode, model)
+        try:
+            rc, stdout_data, stderr_data, timed_out = run_wrapper(argv_list, cwd, prompt_bytes, budget)
+        except FileNotFoundError:
+            _event("skip", f"{name}: skip (wrapper ausente)", executor=name, reason="ausente")
+            continue
+        except RuntimeError as e:
+            _err(str(e))
+            sys.exit(1)
+
+        # Coleta unica por tentativa, antes de ramificar: interrupcao (rc143/144)
+        # apos fallback nao pode herdar executor/tokens da tentativa anterior.
+        _record_run_metrics(name, stdout_data, allowed, cwd, snap_before)
+
+        if timed_out or rc == 124:
+            # Circuito aberto: nao repetir automaticamente um executor sem resposta.
+            try:
+                save_cache({name: {"wrapper": name, "until": time.time() + TIMEOUT_COOLDOWN_SECONDS,
+                                   "reset_known": False, "blocked_reason": "timeout"}})
+            except RuntimeError as e:
+                _err(str(e))
+                sys.exit(1)
+            if args.mode != "plan":
+                # write: snapshot igual nao exclui efeitos externos do worker morto.
+                _exit_timeout(f"{name}: rc=124 (timeout); parando sem fallback", name, "escrita sem fallback")
+            # plan e so leitura: outro worker pode tentar a mesma fatia.
+            had_timeout = True
+            _event("fallback", f"{name}: rc=timeout, fallback (plan)", executor=name, rc=124, reason="timeout")
+            continue
+
+        if rc == 75:
+            admission_busy = stderr_data == b"admission_busy"
+            reset = marker_reset(stderr_data)
+            if reset is None and not admission_busy:
+                from quota_provider import query_reset
+                reset = query_reset(name, budget=max(0, deadline - time.monotonic()))
+            quota_entry = {"wrapper": name, "until": reset, "reset_known": reset is not None}
+            if not admission_busy:
+                try:
+                    save_cache({name: quota_entry})
+                except RuntimeError as e:
+                    _err(str(e))
+                    sys.exit(1)
+                cache[name] = quota_entry
+            if time.monotonic() >= deadline:
+                _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
+
+            if allowed:
+                try:
+                    snap_after = snapshot_allowed(cwd, allowed)
+                except RuntimeError:
+                    _err("aviso: snapshot falhou; parando")
+                    sys.exit(1)
+                if snap_after != snap_before:
+                    _err("aviso: arquivos autorizados alterados apos falha rc75; parando sem fallback")
+                    sys.exit(1)
+            _event("fallback", f"{name}: rc=75, fallback", executor=name, rc=75, reason="cota")
+            if _LOG_FAILED:
+                _note_log_failure()
+                sys.exit(1)
+            continue
+
+        if rc == 143 or rc == 144:
+            _event("stop", f"{name}: rc={rc}", executor=name, rc=rc, detail="interrompido")
+            sys.exit(rc)
+
+        if rc != 0:
+            if name == "zcode-worker" and rc == 1 and stderr_data == b"launcher_incompatible":
+                _err("zcode-worker: launcher de autenticacao incompativel com o bundle; fallback bloqueado (rc=1)")
+            _event("stop", f"{name}: rc={rc}", executor=name, rc=rc, detail="falha")
+            sys.exit(rc if rc > 0 else 1)
+
+        if name in cache:
+            try:
+                save_cache({}, clear={name: cache[name]})
+            except RuntimeError as e:
+                _err(str(e))
+                sys.exit(1)
+        sys.stdout.buffer.write(stdout_data)
+        sys.stdout.buffer.flush()
+        if not _log_write(stdout_data):
+            _note_log_failure()
+            sys.exit(1)
+        _event("result", f"{name}: rc=0", executor=name, rc=0, usage=_parse_usage(stdout_data) or None)
+        sys.exit(0)
+
+    if time.monotonic() >= deadline:
+        _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
+    if had_timeout:
+        _exit_timeout("erro: todos os workers indisponiveis ou com timeout", detail="todos indisponiveis ou com timeout")
+    _event("stop", "erro: todos os workers indisponiveis", rc=75, detail="nenhum worker disponivel")
+    sys.exit(75)
+
+
+def main(argv=None):
+    global _INTERRUPTED
+    prev_int = signal.getsignal(signal.SIGINT)
+    prev_term = signal.getsignal(signal.SIGTERM)
+
+    def handler(signum, frame):
+        global _INTERRUPTED
+        _INTERRUPTED = True
+        p = _CURRENT_PROC
+        if p is not None:
+            _terminate_group(p)
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGINT, handler)
+    signal.signal(signal.SIGTERM, handler)
+    try:
+        try:
+            _main_impl(argv)
+        except SystemExit as e:
+            code = e.code
+            if code is None:
+                rc = 0
+            elif isinstance(code, int):
+                rc = code
+            else:
+                rc = 1
+            if _RUN is not None:
+                _write_run(rc)
+            raise
+        except BaseException:
+            if _RUN is not None:
+                _write_run(1)
+            raise
+        else:
+            if _RUN is not None:
+                _write_run(0)
+    finally:
+        signal.signal(signal.SIGINT, prev_int)
+        signal.signal(signal.SIGTERM, prev_term)
+
+
+def _presentation_helper():
+    """Prefere a apresentação irmã do checkout; a instalada é alternativa."""
+    for helper in (Path(__file__).resolve().parent / "bin" / "ask_presentation.py",
+                   Path.home() / ".local" / "bin" / "ask_presentation.py"):
+        if helper.is_file():
+            return helper
+    return None
+
+
+def _cli():
+    try:
+        main()
+    except SystemExit as e:
+        code = e.code
+        rc = code if isinstance(code, int) else (0 if code is None else 1)
+        if _LOG_FAILED and rc in (0, 75):
+            rc = 1
+        _log_exit(rc)
+        if _LOG_FAILED:
+            _note_log_failure()
+            if rc in (0, 75):
+                rc = 1
+        if isinstance(code, int) or code is None:
+            raise SystemExit(rc)
+        raise
+    except RuntimeError as e:
+        _err(str(e))
+        _log_exit(1)
+        if _LOG_FAILED:
+            _note_log_failure()
+        sys.exit(1)
+    except Exception:
+        _err("erro: falha local de infraestrutura; execucao interrompida")
+        _log_exit(1)
+        if _LOG_FAILED:
+            _note_log_failure()
+        sys.exit(1)
+    rc = 1 if _LOG_FAILED else 0
+    _log_exit(rc)
+    if _LOG_FAILED:
+        _note_log_failure()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    if os.environ.get("ASK_PRESENTATION_ACTIVE") != "1":
+        _helper = _presentation_helper()
+        if _helper is not None:
+            os.execv(sys.executable, [sys.executable, str(_helper), "--provider", "worker-ask", "--", os.path.abspath(__file__), *sys.argv[1:]])
+    _cli()
