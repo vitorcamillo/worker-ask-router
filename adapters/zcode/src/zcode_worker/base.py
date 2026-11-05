@@ -47,7 +47,7 @@ QUOTA_RE = re.compile(
     r"|usage\s+limit|cota\s+(?:esgotada|excedida))",
     re.I,
 )
-RATE_RE = re.compile(r"(?:429|rate.?limit|too many requests|限流)", re.I)
+RATE_RE = re.compile(r"(?:\b429\b|rate.?limit|too many requests|限流)", re.I)
 TASK_MAX_BYTES = 96 * 1024
 TASK_ARGUMENT_MAX_BYTES = 64 * 1024
 PREAMBULO = """[WORKER — chamado via zcode-worker]

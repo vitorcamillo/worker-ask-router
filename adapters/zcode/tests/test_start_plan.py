@@ -99,24 +99,24 @@ def test_env_disable_and_enable(tmp_path):
 def test_provider_for_invalid_model(tmp_path):
     assert features.provider_for("invalido", now=noon(), state_dir=tmp_path / "s", environ={}) == base.PROVIDER_ID
 
-def test_block_rate_limit_last_15_minutes(tmp_path):
+def test_block_rate_limit_last_2_minutes(tmp_path):
     s = tmp_path / "state"
     now = datetime.datetime(2026, 10, 15, 13, 20)
     assert features.start_plan_blocked(now=now, state_dir=s) is False
     features.mark_start_plan_unavailable("rate_limit", now=now, state_dir=s)
     marker = s / features.START_PLAN_MARKER
-    assert marker.read_text(encoding="utf-8") == "2026-10-15T13:35:00 rate_limit\n"
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 34), state_dir=s) is True
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 35), state_dir=s) is False
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 30), state_dir=s, environ={}) == base.PROVIDER_ID
+    assert marker.read_text(encoding="utf-8") == "2026-10-15T13:22:00 rate_limit\n"
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is True
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 22), state_dir=s) is False
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s, environ={}) == base.PROVIDER_ID
 
-def test_block_refused_last_15_minutes(tmp_path):
+def test_block_refused_last_2_minutes(tmp_path):
     s = tmp_path / "state"
     now = datetime.datetime(2026, 10, 15, 13, 20)
     features.mark_start_plan_unavailable("refused", now=now, state_dir=s)
-    assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-15T13:35:00 refused\n"
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 34), state_dir=s) is True
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 35), state_dir=s) is False
+    assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-15T13:22:00 refused\n"
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is True
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 22), state_dir=s) is False
 
 def test_block_quota_until_midnight(tmp_path):
     s = tmp_path / "state"
