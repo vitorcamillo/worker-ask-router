@@ -352,7 +352,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
                         command, env, execution_deadline, args.max_output_bytes
                     )
                     if isinstance(response, tuple) and len(response) == 3 and response[0] != 0:
-                        _delete_session_from_stdout(response[1], db_path=db_path)
+                        _delete_session_from_stdout(response[1], db_path=db_path, keep=(args.resume,))
                         raise _classify_process_failure(response[0], response[2])
                     return response
                 except features.FeatureError as error:
@@ -462,14 +462,115 @@ def _delete_session(session_id: str, *, db_path=None) -> bool:
             connection.close()
 
 
-def _delete_session_from_stdout(stdout: str, *, db_path=None) -> bool:
-    """Extrai o sessionId do stdout e apaga a sessão de uma tentativa falha."""
+def _delete_session_from_stdout(stdout: str, *, db_path=None, keep=()) -> bool:
+    """Extrai o sessionId do stdout e apaga a sessão de uma tentativa falha.
 
+    A sessão retomada via ``--resume`` (id válido em ``keep``) é preservada:
+    o stdout da tentativa devolve esse mesmo id, e apagá-lo destruiria o
+    histórico pendente e invalidaria o retry, que reutiliza o id.
+    """
+
+    keep_ids = {sid for sid in (keep or ()) if isinstance(sid, str)}
     with contextlib.suppress(Exception):
         payload = features.decode_response(stdout)
         if isinstance(payload, dict):
-            return bool(_delete_session(payload.get("sessionId"), db_path=db_path))
+            session_id = payload.get("sessionId")
+            if session_id in keep_ids:
+                return False
+            return bool(_delete_session(session_id, db_path=db_path))
     return False
+
+
+_CONTENT_COLUMNS = ("data", "content", "text")
+_PART_SESSION_COLUMNS = ("session_id", "sessionId", "sessionid")
+_PART_MESSAGE_COLUMNS = ("message_id", "messageId", "messageid")
+_MESSAGE_ID_COLUMNS = ("id", "message_id", "messageId")
+
+
+def _pending_session_ids(connection) -> set[str] | None:
+    """Sessões com marcador de turno na mensagem ou nas partes da resposta.
+
+    O texto pode estar na própria ``message`` ou em ``part`` (com
+    ``message.data`` guardando só metadados); as colunas são descobertas por
+    pragma, schema defensivo. Parte com ``session_id`` NULL é resolvida pelo
+    vínculo com ``message``; devolve ``None`` quando há conteúdo em ``part``
+    que não pode ser atribuído a uma sessão (sem colunas de vínculo,
+    message_id NULL ou mensagem inexistente/sem sessão): a pendência fica
+    indeterminável e o expurgo deve preservar todas as sessões.
+    """
+    message_columns = {
+        row[1] for row in connection.execute("pragma table_info(message)")
+    }
+    part_columns = {row[1] for row in connection.execute("pragma table_info(part)")}
+    message_content = next(
+        (name for name in _CONTENT_COLUMNS if name in message_columns), None
+    )
+    part_content = next(
+        (name for name in _CONTENT_COLUMNS if name in part_columns), None
+    )
+    pending = set()
+    if message_content is not None:
+        pending |= {
+            row[0]
+            for row in connection.execute(
+                f"select distinct session_id from message"
+                f" where instr({message_content}, ?) > 0",
+                (features.TURN_MARKER,),
+            )
+        }
+    if part_content is None:
+        return pending
+    part_session = next(
+        (name for name in _PART_SESSION_COLUMNS if name in part_columns), None
+    )
+    part_message = next(
+        (name for name in _PART_MESSAGE_COLUMNS if name in part_columns), None
+    )
+    message_id = next(
+        (name for name in _MESSAGE_ID_COLUMNS if name in message_columns), None
+    )
+    # O vínculo pela mensagem resolve também parte com session_id NULL; sem
+    # as colunas de vínculo (ou sem session_id na message), NULL segue
+    # indeterminável e preserva todas as sessões.
+    linked = (
+        part_message is not None
+        and message_id is not None
+        and "session_id" in message_columns
+    )
+    if part_session is not None:
+        if linked:
+            rows = connection.execute(
+                f"select distinct coalesce(p.{part_session}, m.session_id)"
+                f" from part p left join message m"
+                f" on m.{message_id} = p.{part_message}"
+                f" where instr(p.{part_content}, ?) > 0",
+                (features.TURN_MARKER,),
+            ).fetchall()
+            if any(row[0] is None for row in rows):
+                return None
+            pending |= {row[0] for row in rows}
+            return pending
+        rows = connection.execute(
+            f"select distinct {part_session} from part"
+            f" where instr({part_content}, ?) > 0",
+            (features.TURN_MARKER,),
+        ).fetchall()
+        if any(row[0] is None for row in rows):
+            return None
+        pending |= {row[0] for row in rows}
+        return pending
+    if part_message is None or message_id is None:
+        return None
+    pending |= {
+        row[0]
+        for row in connection.execute(
+            f"select distinct m.session_id from message m"
+            f" join part p on p.{part_message} = m.{message_id}"
+            f" where instr(p.{part_content}, ?) > 0",
+            (features.TURN_MARKER,),
+        )
+    }
+    return pending
 
 
 def _purge_stale_worker_sessions(
@@ -512,29 +613,17 @@ def _purge_stale_worker_sessions(
         ).fetchall()
         ids = [row[0] for row in rows if row[0] not in keep_ids]
         # Sessão need_input aguarda resposta do orquestrador por tempo
-        # indeterminado; o marcador de turno numa mensagem é o traço durável
-        # de que a conversa segue viva e não pode ser expurgada pelo TTL. A
-        # coluna de conteúdo é descoberta por pragma (schema defensivo); sem
-        # ela, nenhuma sessão é considerada pendente.
-        content_column = next(
-            (
-                name
-                for name in ("data", "content", "text")
-                if name
-                in {row[1] for row in connection.execute("pragma table_info(message)")}
-            ),
-            None,
-        )
+        # indeterminado; o marcador de turno é o traço durável de que a
+        # conversa segue viva e não pode ser expurgada pelo TTL. O marcador é
+        # procurado na mensagem e nas partes da resposta; sem coluna de
+        # conteúdo em nenhuma das duas, nenhuma sessão é considerada
+        # pendente. Pendência indeterminável preserva todas as sessões.
         pending = set()
-        if content_column is not None and ids:
-            pending = {
-                row[0]
-                for row in connection.execute(
-                    f"select distinct session_id from message"
-                    f" where instr({content_column}, ?) > 0",
-                    (features.TURN_MARKER,),
-                )
-            }
+        if ids:
+            detected = _pending_session_ids(connection)
+            if detected is None:
+                return 0
+            pending = detected
             ids = [sid for sid in ids if sid not in pending]
         # Uma filha protegida (keep/need_input) não pode morrer junto com o
         # pai expirado: preserve-a e preserve também os ancestrais dela, ou o
@@ -748,13 +837,13 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
                 if returncode != 0:
-                    _delete_session_from_stdout(stdout, db_path=db_path)
+                    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
                     raise _classify_process_failure(returncode, stderr)
                 try:
                     payload = features.validate_response(features.decode_response(stdout))
                     effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
                 except Exception:
-                    _delete_session_from_stdout(stdout, db_path=db_path)
+                    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
                     raise
                 fallback = probe_fallback
                 if args._provider == features.START_PLAN_PROVIDER_ID and effective.get("providerId") != args._provider:
@@ -785,13 +874,13 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
                 if returncode != 0:
-                    _delete_session_from_stdout(stdout, db_path=db_path)
+                    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
                     raise _classify_process_failure(returncode, stderr)
                 try:
                     payload = features.validate_response(features.decode_response(stdout))
                     effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
                 except Exception:
-                    _delete_session_from_stdout(stdout, db_path=db_path)
+                    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
                     raise
                 return _finish(payload, requested, effective, _fallback)
     except getattr(base, "Terminated", ()) as error:
