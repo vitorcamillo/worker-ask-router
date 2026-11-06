@@ -199,6 +199,32 @@ def test_purge_preserves_pending_turn_and_keep_ids(tmp_path):
     assert message_ids(db) == ["m2", "m3"]
 
 
+def test_purge_preserves_all_when_message_session_null(tmp_path):
+    # Marcador de turno em message com session_id NULL: a pendência não pode
+    # ser atribuída a uma sessão e o expurgo preserva todas as candidatas.
+    old = now_ms() - 7 * 3600 * 1000
+    db = tmp_path / "db.sqlite"
+    make_db(
+        db,
+        sessions=[
+            ("sess_velha", None, "[WORKER] antiga", old),
+            ("sess_outra", None, "[WORKER] outra antiga", old),
+        ],
+        messages=[("m1", "sess_velha"), ("m2", "sess_outra")],
+    )
+    connection = sqlite3.connect(db)
+    connection.execute("alter table message add column data text")
+    connection.execute(
+        "insert into message values ('m_orfa', null, ?)",
+        ("pergunta\n" + features.TURN_MARKER + '\n{"question": "..."}',),
+    )
+    connection.commit()
+    connection.close()
+    assert cli._purge_stale_worker_sessions(db_path=db) == 0
+    assert session_ids(db) == ["sess_outra", "sess_velha"]
+    assert message_ids(db) == ["m1", "m2", "m_orfa"]
+
+
 def test_purge_keeps_keep_child_and_its_expired_parent(tmp_path):
     old = now_ms() - 7 * 3600 * 1000
     db = tmp_path / "db.sqlite"
@@ -445,6 +471,51 @@ def test_purge_preserves_all_when_part_linkage_unknown(tmp_path):
     assert cli._purge_stale_worker_sessions(db_path=db) == 0
     assert session_ids(db) == ["sess_velha"]
     assert message_ids(db) == ["m1"]
+
+
+def test_purge_blocks_concurrent_pending_write_during_reads(tmp_path, monkeypatch):
+    # Concorrência: seleção, detecção de pendências e exclusão correm na
+    # mesma transação de escrita; outra conexão não consegue registrar
+    # pendência no intervalo entre as leituras e o delete.
+    old = now_ms() - 7 * 3600 * 1000
+    db = tmp_path / "db.sqlite"
+    make_db(
+        db,
+        sessions=[
+            ("sess_velha", None, "[WORKER] antiga", old),
+            ("sess_outra", None, "[WORKER] outra antiga", old),
+        ],
+        messages=[("m1", "sess_velha"), ("m2", "sess_outra")],
+    )
+    connection = sqlite3.connect(db)
+    connection.execute("alter table message add column data text")
+    connection.commit()
+    connection.close()
+
+    attempts = []
+    original = cli._pending_session_ids
+
+    def rival_marks_pending(inner):
+        rival = sqlite3.connect(db, timeout=0.2)
+        try:
+            rival.execute(
+                "update message set data=? where id='m1'",
+                ("pergunta\n" + features.TURN_MARKER + '\n{"question": "..."}',),
+            )
+            rival.commit()
+            attempts.append("committed")
+        except sqlite3.OperationalError:
+            attempts.append("locked")
+        finally:
+            rival.close()
+        return original(inner)
+
+    monkeypatch.setattr(cli, "_pending_session_ids", rival_marks_pending)
+    assert cli._purge_stale_worker_sessions(db_path=db) == 2
+    # Sem a transação nas leituras, o rival commitava o marcador depois da
+    # seleção e a exclusão seguia com ids antigos.
+    assert attempts == ["locked"]
+    assert session_ids(db) == []
 
 
 def _run_error_case(tmp_path, monkeypatch, *, raw, session_rows):

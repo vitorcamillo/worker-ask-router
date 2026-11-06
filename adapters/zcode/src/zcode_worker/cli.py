@@ -493,10 +493,11 @@ def _pending_session_ids(connection) -> set[str] | None:
     O texto pode estar na própria ``message`` ou em ``part`` (com
     ``message.data`` guardando só metadados); as colunas são descobertas por
     pragma, schema defensivo. Parte com ``session_id`` NULL é resolvida pelo
-    vínculo com ``message``; devolve ``None`` quando há conteúdo em ``part``
-    que não pode ser atribuído a uma sessão (sem colunas de vínculo,
-    message_id NULL ou mensagem inexistente/sem sessão): a pendência fica
-    indeterminável e o expurgo deve preservar todas as sessões.
+    vínculo com ``message``; devolve ``None`` quando há conteúdo em
+    ``message`` ou ``part`` que não pode ser atribuído a uma sessão (sessão
+    NULL na mensagem, sem colunas de vínculo, message_id NULL ou mensagem
+    inexistente/sem sessão): a pendência fica indeterminável e o expurgo deve
+    preservar todas as sessões.
     """
     message_columns = {
         row[1] for row in connection.execute("pragma table_info(message)")
@@ -510,14 +511,16 @@ def _pending_session_ids(connection) -> set[str] | None:
     )
     pending = set()
     if message_content is not None:
-        pending |= {
-            row[0]
-            for row in connection.execute(
-                f"select distinct session_id from message"
-                f" where instr({message_content}, ?) > 0",
-                (features.TURN_MARKER,),
-            )
-        }
+        rows = connection.execute(
+            f"select distinct session_id from message"
+            f" where instr({message_content}, ?) > 0",
+            (features.TURN_MARKER,),
+        ).fetchall()
+        # Marcador em mensagem com session_id NULL não atribui a pendência a
+        # nenhuma sessão; {None} no conjunto deixava o expurgo apagar sessões.
+        if any(row[0] is None for row in rows):
+            return None
+        pending |= {row[0] for row in rows}
     if part_content is None:
         return pending
     part_session = next(
@@ -609,6 +612,10 @@ def _purge_stale_worker_sessions(
             for sid in keep
             if isinstance(sid, str) and features.SESSION_RE.fullmatch(sid)
         }
+        # A transação de escrita começa antes das leituras: sem o BEGIN
+        # IMMEDIATE, outra conexão podia registrar pendência depois da
+        # seleção/detecção e antes da exclusão, que seguiria com ids antigos.
+        connection.execute("BEGIN IMMEDIATE")
         rows = connection.execute(
             "select id from session where title like '[WORKER%' and time_updated < ?",
             (cutoff,),
