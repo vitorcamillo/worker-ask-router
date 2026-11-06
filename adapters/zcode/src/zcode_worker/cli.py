@@ -36,6 +36,7 @@ _LAUNCHER_INCOMPATIBLE_RE = re.compile(
 )
 _LAUNCHER_INCOMPATIBLE_MESSAGE = "launcher de autenticacao incompativel com o bundle do ZCode"
 QUOTA_RETRY_DEFAULT_SECONDS = 3600
+WORKER_SESSION_TTL_SECONDS = 6 * 3600
 
 
 def _kill(process) -> None:
@@ -417,11 +418,14 @@ def _terminated_result(
     )
 
 
-def _archive_session(session_id: str, *, db_path=None) -> bool:
-    """Arquiva a própria sessão do worker ao finalizar (best-effort).
+def _delete_session(session_id: str, *, db_path=None) -> bool:
+    """Apaga a própria sessão do worker ao finalizar (best-effort).
 
     Só toca em sessões cujo título começa com o preâmbulo de worker, para
-    nunca fechar sessão interativa do usuário. Falha é apenas ignorada.
+    nunca apagar sessão interativa do usuário. O cascade via
+    ``PRAGMA foreign_keys=ON`` remove message/part/session_entry; os filhos
+    (``parent_id``) são apagados explicitamente antes do pai. Falha é apenas
+    ignorada.
     """
     from urllib.parse import quote
 
@@ -435,21 +439,81 @@ def _archive_session(session_id: str, *, db_path=None) -> bool:
     connection = None
     try:
         uri = f"file:{quote(os.path.abspath(path), safe='/')}?mode=rw"
-        connection = sqlite3.connect(uri, uri=True, timeout=2.0)
-        connection.execute("PRAGMA busy_timeout=2000")
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
         row = connection.execute(
-            "select title, time_archived from session where id=?", (session_id,)
+            "select title from session where id=?", (session_id,)
         ).fetchone()
-        if not row or not str(row[0]).startswith("[WORKER") or row[1] is not None:
+        if not row or not str(row[0]).startswith("[WORKER"):
             return False
         with connection:
+            connection.execute("delete from session where parent_id=?", (session_id,))
             connection.execute(
-                "update session set time_archived=? where id=? and time_archived is null",
-                (int(time.time() * 1000), session_id),
+                "delete from session where id=? and title like '[WORKER%'",
+                (session_id,),
             )
         return True
     except (OSError, sqlite3.Error, ValueError):
         return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _delete_session_from_stdout(stdout: str, *, db_path=None) -> bool:
+    """Extrai o sessionId do stdout e apaga a sessão de uma tentativa falha."""
+
+    with contextlib.suppress(Exception):
+        payload = features.decode_response(stdout)
+        if isinstance(payload, dict):
+            return bool(_delete_session(payload.get("sessionId"), db_path=db_path))
+    return False
+
+
+def _purge_stale_worker_sessions(
+    *, db_path=None, older_than_seconds=WORKER_SESSION_TTL_SECONDS
+) -> int:
+    """Apaga sessões ``[WORKER...]`` desatualizadas e seus filhos (best-effort).
+
+    Retorna quantas sessões foram apagadas; qualquer falha devolve 0.
+    """
+    from urllib.parse import quote
+
+    import sqlite3
+
+    try:
+        threshold = float(older_than_seconds)
+    except (TypeError, ValueError):
+        return 0
+    path = os.fspath(db_path or base.DB)
+    if not os.path.exists(path):
+        return 0
+    connection = None
+    try:
+        uri = f"file:{quote(os.path.abspath(path), safe='/')}?mode=rw"
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        cutoff = int((time.time() - threshold) * 1000)
+        rows = connection.execute(
+            "select id from session where title like '[WORKER%' and time_updated < ?",
+            (cutoff,),
+        ).fetchall()
+        ids = [row[0] for row in rows]
+        if not ids:
+            return 0
+        with connection:
+            connection.executemany(
+                "delete from session where parent_id=?", [(sid,) for sid in ids]
+            )
+            connection.executemany(
+                "delete from session where id=? and title like '[WORKER%'",
+                [(sid,) for sid in ids],
+            )
+        return len(ids)
+    except (OSError, sqlite3.Error, ValueError):
+        return 0
     finally:
         if connection is not None:
             connection.close()
@@ -482,7 +546,7 @@ def _probe_start_plan(args, *, db_path=None, runner=None, total_deadline=None):
     effective = features.verify_effective(
         payload, probe_args.model, probe_args.effort, db_path=db_path, provider=features.START_PLAN_PROVIDER_ID
     )
-    _archive_session(payload.get("sessionId"), db_path=db_path)
+    _delete_session(payload.get("sessionId"), db_path=db_path)
     return payload, effective
 
 
@@ -522,6 +586,8 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raise features.FeatureError("tarefa inválida")
             args._provider = features.provider_for(args.model)
             requested = features.requested_selection(args.model, args.effort, args._provider)
+            with contextlib.suppress(Exception):
+                _purge_stale_worker_sessions(db_path=db_path)
             total_deadline = started + (args.total_timeout or args.timeout + args.queue_timeout)
             _emit(event_sink, {
                 "kind": "turn_start",
@@ -541,8 +607,8 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 _status = "need_input" if _pending is not None else "ok"
                 _exit_code = 2 if _pending is not None else 0
                 if _status == "ok":
-                    # Fatia encerrada: arquiva a sessão do worker para não acumular.
-                    _archive_session(payload.get("sessionId"), db_path=db_path)
+                    # Fatia encerrada: apaga a sessão do worker para não acumular.
+                    _delete_session(payload.get("sessionId"), db_path=db_path)
                     if _effective.get("providerId") == features.START_PLAN_PROVIDER_ID:
                         features.mark_start_plan_confirmed()
                 _emit(event_sink, {"kind": "turn_end", "status": _status, "exitCode": _exit_code})
@@ -625,9 +691,14 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
                 if returncode != 0:
+                    _delete_session_from_stdout(stdout, db_path=db_path)
                     raise _classify_process_failure(returncode, stderr)
-                payload = features.validate_response(features.decode_response(stdout))
-                effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
+                try:
+                    payload = features.validate_response(features.decode_response(stdout))
+                    effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
+                except Exception:
+                    _delete_session_from_stdout(stdout, db_path=db_path)
+                    raise
                 fallback = probe_fallback
                 if args._provider == features.START_PLAN_PROVIDER_ID and effective.get("providerId") != args._provider:
                     features.mark_start_plan_unavailable("mismatch")
@@ -657,9 +728,14 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
                 if returncode != 0:
+                    _delete_session_from_stdout(stdout, db_path=db_path)
                     raise _classify_process_failure(returncode, stderr)
-                payload = features.validate_response(features.decode_response(stdout))
-                effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
+                try:
+                    payload = features.validate_response(features.decode_response(stdout))
+                    effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
+                except Exception:
+                    _delete_session_from_stdout(stdout, db_path=db_path)
+                    raise
                 return _finish(payload, requested, effective, _fallback)
     except getattr(base, "Terminated", ()) as error:
         effects_may_exist = bool(
