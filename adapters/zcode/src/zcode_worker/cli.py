@@ -352,6 +352,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
                         command, env, execution_deadline, args.max_output_bytes
                     )
                     if isinstance(response, tuple) and len(response) == 3 and response[0] != 0:
+                        _delete_session_from_stdout(response[1], db_path=db_path)
                         raise _classify_process_failure(response[0], response[2])
                     return response
                 except features.FeatureError as error:
@@ -472,11 +473,15 @@ def _delete_session_from_stdout(stdout: str, *, db_path=None) -> bool:
 
 
 def _purge_stale_worker_sessions(
-    *, db_path=None, older_than_seconds=WORKER_SESSION_TTL_SECONDS
+    *, db_path=None, older_than_seconds=WORKER_SESSION_TTL_SECONDS, keep=()
 ) -> int:
     """Apaga sessões ``[WORKER...]`` desatualizadas e seus filhos (best-effort).
 
-    Retorna quantas sessões foram apagadas; qualquer falha devolve 0.
+    Sessões pendentes (``need_input`` aguardando resposta, mesmo além do TTL) e
+    as ids válidas em ``keep`` (ex.: a sessão alvo de ``--resume``) são
+    preservadas, junto com os ancestrais delas: o pai expirado não pode
+    apagar a filha protegida. Retorna quantas sessões foram apagadas; falha
+    devolve 0.
     """
     from urllib.parse import quote
 
@@ -496,11 +501,60 @@ def _purge_stale_worker_sessions(
         connection.execute("PRAGMA busy_timeout=5000")
         connection.execute("PRAGMA foreign_keys=ON")
         cutoff = int((time.time() - threshold) * 1000)
+        keep_ids = {
+            sid
+            for sid in keep
+            if isinstance(sid, str) and features.SESSION_RE.fullmatch(sid)
+        }
         rows = connection.execute(
             "select id from session where title like '[WORKER%' and time_updated < ?",
             (cutoff,),
         ).fetchall()
-        ids = [row[0] for row in rows]
+        ids = [row[0] for row in rows if row[0] not in keep_ids]
+        # Sessão need_input aguarda resposta do orquestrador por tempo
+        # indeterminado; o marcador de turno numa mensagem é o traço durável
+        # de que a conversa segue viva e não pode ser expurgada pelo TTL. A
+        # coluna de conteúdo é descoberta por pragma (schema defensivo); sem
+        # ela, nenhuma sessão é considerada pendente.
+        content_column = next(
+            (
+                name
+                for name in ("data", "content", "text")
+                if name
+                in {row[1] for row in connection.execute("pragma table_info(message)")}
+            ),
+            None,
+        )
+        pending = set()
+        if content_column is not None and ids:
+            pending = {
+                row[0]
+                for row in connection.execute(
+                    f"select distinct session_id from message"
+                    f" where instr({content_column}, ?) > 0",
+                    (features.TURN_MARKER,),
+                )
+            }
+            ids = [sid for sid in ids if sid not in pending]
+        # Uma filha protegida (keep/need_input) não pode morrer junto com o
+        # pai expirado: preserve-a e preserve também os ancestrais dela, ou o
+        # delete do pai — direto ou pela cascade do schema real — apaga a
+        # sessão que o expurgo prometeu manter.
+        protected = tuple(keep_ids | pending)
+        if ids and protected:
+            seed = ",".join("?" for _ in protected)
+            preserve = {
+                row[0]
+                for row in connection.execute(
+                    "with recursive ancestors(node) as ("
+                    f"select id from session where id in ({seed})"
+                    " union select s.parent_id from session s"
+                    " join ancestors a on s.id = a.node"
+                    ") select distinct node from ancestors where node is not null",
+                    protected,
+                )
+            }
+            ids = [sid for sid in ids if sid not in preserve]
         if not ids:
             return 0
         with connection:
@@ -586,8 +640,6 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raise features.FeatureError("tarefa inválida")
             args._provider = features.provider_for(args.model)
             requested = features.requested_selection(args.model, args.effort, args._provider)
-            with contextlib.suppress(Exception):
-                _purge_stale_worker_sessions(db_path=db_path)
             total_deadline = started + (args.total_timeout or args.timeout + args.queue_timeout)
             _emit(event_sink, {
                 "kind": "turn_start",
@@ -655,6 +707,11 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     "response": "não executado",
                 }
                 return result, 0
+            # Expurgo somente em execução real: uma simulação não pode apagar
+            # sessões, e a sessão alvo de --resume precisa sobreviver à limpeza
+            # para ser validada em vez de virar resume_mismatch.
+            with contextlib.suppress(Exception):
+                _purge_stale_worker_sessions(db_path=db_path, keep=(args.resume,))
             probe_fallback = None
             if (
                 args._provider == features.START_PLAN_PROVIDER_ID
