@@ -18,6 +18,7 @@ import sqlite3
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import quote
@@ -37,12 +38,14 @@ PROFILES = {
 TASK_MAX_BYTES = base.TASK_MAX_BYTES
 START_PLAN_PROVIDER_ID = "account:zai-start-plan"
 START_PLAN_MODELS = frozenset({"glm-5.3-flash"})
-START_PLAN_HOURS = (12, 22)
+START_PLAN_HOURS = (0, 24)  # Start Plan vale o dia todo até expirar; janela via ZCODE_WORKER_START_PLAN_HOURS
 START_PLAN_BUSY_MINUTES = 2
 START_PLAN_MARKER = "start-plan-unavailable"
 START_PLAN_OK_MARKER = "start-plan-ok"
 MAX_ATTACHMENTS = 5
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+# Órfãos de provider-*.json (processo morto antes do finally) expiram em 24h.
+PROVIDER_TMP_TTL_SECONDS = 24 * 3600
 DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 SESSION_RE = re.compile(r"^sess_[A-Za-z0-9_-]+$")
 TOOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_:-]*$")
@@ -718,6 +721,31 @@ def verify_effective(
     return actual
 
 
+def _purge_stale_provider_files(directory: Path) -> None:
+    """Remove best-effort órfãos provider-*.json mais velhos que o TTL.
+
+    Só arquivos regulares do diretório informado, donos do uid atual; symlinks
+    e qualquer OSError são ignorados. Nunca alcança outros diretórios.
+    """
+
+    cutoff = time.time() - PROVIDER_TMP_TTL_SECONDS
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not name.startswith("provider-") or not name.endswith(".json"):
+            continue
+        try:
+            info = (directory / name).lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mtime > cutoff:
+            continue
+        with contextlib.suppress(OSError):
+            os.unlink(directory / name)
+
+
 @contextlib.contextmanager
 def temporary_provider(model: str, effort: str, *, state_dir: str | os.PathLike[str] | None = None, provider: str | None = None):
     """Cria e remove um provider temporário privado com modo 0600."""
@@ -759,6 +787,9 @@ def temporary_provider(model: str, effort: str, *, state_dir: str | os.PathLike[
     # de validar dono/tipo sem seguir symlink, endurecemos apenas esse diretório.
     ensure_private_directory(state, create=True, repair_mode=True)
     ensure_private_directory(directory, create=True)
+    # Processos mortos (SIGKILL/timeout) nunca passam pelo finally e deixam
+    # órfãos provider-*.json; limpamos os vencidos logo antes de criar o novo.
+    _purge_stale_provider_files(directory)
     try:
         config = base.carregar_config_provider(model, effort)
         if provider is not None:

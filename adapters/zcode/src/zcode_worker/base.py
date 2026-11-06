@@ -132,12 +132,17 @@ def _config_node(config):
         raise WorkerError("provider_config inválido")
     node = config.get("config") if isinstance(config.get("config"), dict) else config
     selection = node.get("defaultModelSelection") if isinstance(node, dict) else None
-    # O provider de origem é só o template da conta Z.ai: a seleção efetiva é
-    # do PROVIDER_ID deste worker (plano pago); features troca para o Start Plan
-    # quando couber (horário e patch opcional do launch.cjs).
+    # O provider de origem é só template: a seleção efetiva é sempre do
+    # PROVIDER_ID deste worker (plano pago); seleção estranha (ex.
+    # claude-code, chatgpt-codex) é substituída por uma nova, sem reaproveitar
+    # options de provider alheio. Features troca para o Start Plan quando
+    # couber — a janela de horário agora é o dia todo por padrão
+    # (ZCODE_WORKER_START_PLAN_HOURS restringe) — com patch opcional do
+    # launch.cjs.
     provider = selection.get("providerId") if isinstance(selection, dict) else None
-    if not isinstance(provider, str) or not provider.startswith(("account:zai-", "account:bigmodel-")):
-        raise WorkerError("provider configurado fora da conta Z.ai esperada")
+    if not isinstance(selection, dict) or not isinstance(provider, str) or not provider.startswith(("account:zai-", "account:bigmodel-")):
+        selection = {"providerId": PROVIDER_ID}
+        node["defaultModelSelection"] = selection
     selection["providerId"] = PROVIDER_ID
     return selection
 

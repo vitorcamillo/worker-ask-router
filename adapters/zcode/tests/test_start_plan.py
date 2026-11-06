@@ -52,7 +52,7 @@ def noon(day=15):
     return datetime.datetime(2026, 10, day, 12, 0)
 
 def test_start_plan_hours_defaults_and_shapes():
-    assert features.start_plan_hours({}) == (12, 22)
+    assert features.start_plan_hours({}) == (0, 24)
     assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": "9-18"}) == (9, 18)
     assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": " 12 - 22 "}) == (12, 22)
     assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": "0-24"}) == (0, 24)
@@ -62,16 +62,17 @@ def test_start_plan_hours_defaults_and_shapes():
 
 def test_start_plan_hours_invalid_falls_back():
     for raw in ("22-12", "x", "0-25", "12", "12-22-1", "a-b", "", "12-", "-5", "5-5", "24-24"):
-        assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": raw}) == (12, 22)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": 12}) == (12, 22)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": None}) == (12, 22)
+        assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": raw}) == (0, 24)
+    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": 12}) == (0, 24)
+    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": None}) == (0, 24)
 
 def test_window_boundaries(tmp_path):
     s = tmp_path / "state"
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 11, 59), state_dir=s, environ={}) == base.PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 12, 0), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 21, 59), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 22, 0), state_dir=s, environ={}) == base.PROVIDER_ID
+    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 11, 59), state_dir=s, environ=window) == base.PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 12, 0), state_dir=s, environ=window) == features.START_PLAN_PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 21, 59), state_dir=s, environ=window) == features.START_PLAN_PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 22, 0), state_dir=s, environ=window) == base.PROVIDER_ID
 
 def test_provider_for_respects_hours_env(tmp_path):
     s = tmp_path / "state"
@@ -80,9 +81,15 @@ def test_provider_for_respects_hours_env(tmp_path):
     assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 12, 0), state_dir=s, environ=env) == features.START_PLAN_PROVIDER_ID
     always = {"ZCODE_WORKER_START_PLAN_HOURS": "always"}
     assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ=always) == features.START_PLAN_PROVIDER_ID
+    # Inválido cai no padrão (0, 24): vale o dia todo, inclusive fora de qualquer janela restrita.
     invalid = {"ZCODE_WORKER_START_PLAN_HOURS": "x"}
     assert features.provider_for("glm-5.3-flash", now=noon(), state_dir=s, environ=invalid) == features.START_PLAN_PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ=invalid) == base.PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ=invalid) == features.START_PLAN_PROVIDER_ID
+
+
+def test_provider_for_default_window_covers_all_day(tmp_path):
+    s = tmp_path / "state"
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
 
 def test_glm53_never_start(tmp_path):
     s = tmp_path / "state"
@@ -599,14 +606,16 @@ def test_next_available_inside_window_without_marker(tmp_path):
 
 def test_next_available_before_window_returns_same_day_open(tmp_path):
     s = tmp_path / "state"
+    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
     now = datetime.datetime(2026, 10, 15, 10, 0)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ={}) == datetime.datetime(2026, 10, 15, 12, 0)
+    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=window) == datetime.datetime(2026, 10, 15, 12, 0)
 
 
 def test_next_available_after_window_returns_next_day_open(tmp_path):
     s = tmp_path / "state"
+    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
     now = datetime.datetime(2026, 10, 15, 22, 30)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ={}) == datetime.datetime(2026, 10, 16, 12, 0)
+    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=window) == datetime.datetime(2026, 10, 16, 12, 0)
 
 
 def test_next_available_busy_marker_inside_window(tmp_path):
@@ -619,10 +628,11 @@ def test_next_available_busy_marker_inside_window(tmp_path):
 
 def test_next_available_midnight_marker_after_hours(tmp_path):
     s = tmp_path / "state"
+    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
     s.mkdir(parents=True)
     (s / features.START_PLAN_MARKER).write_text("2026-10-16T00:00:00 quota\n", encoding="utf-8")
     now = datetime.datetime(2026, 10, 15, 15, 0)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ={}) == datetime.datetime(2026, 10, 16, 12, 0)
+    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=window) == datetime.datetime(2026, 10, 16, 12, 0)
 
 
 def test_next_available_expired_marker_behaves_as_no_marker(tmp_path):
