@@ -561,15 +561,17 @@ def _pending_session_ids(connection) -> set[str] | None:
         return pending
     if part_message is None or message_id is None:
         return None
-    pending |= {
-        row[0]
-        for row in connection.execute(
-            f"select distinct m.session_id from message m"
-            f" join part p on p.{part_message} = m.{message_id}"
-            f" where instr(p.{part_content}, ?) > 0",
-            (features.TURN_MARKER,),
-        )
-    }
+    # LEFT JOIN mantém a parte sem mensagem correspondente (message_id NULL
+    # ou inexistente); sessão NULL na mensagem também é indeterminável.
+    rows = connection.execute(
+        f"select distinct m.session_id from part p"
+        f" left join message m on m.{message_id} = p.{part_message}"
+        f" where instr(p.{part_content}, ?) > 0",
+        (features.TURN_MARKER,),
+    ).fetchall()
+    if any(row[0] is None for row in rows):
+        return None
+    pending |= {row[0] for row in rows}
     return pending
 
 

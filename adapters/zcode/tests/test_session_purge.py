@@ -362,6 +362,39 @@ def test_purge_preserves_all_when_part_session_null_link_missing(tmp_path):
     assert message_ids(db) == ["m1", "m2"]
 
 
+def test_purge_preserves_all_when_part_message_link_unresolved(tmp_path):
+    # part sem coluna session_id: message_id NULL, mensagem inexistente ou
+    # mensagem sem sessão deixam a pendência indeterminável (None), e o
+    # expurgo preserva todas as sessões candidatas.
+    old = now_ms() - 7 * 3600 * 1000
+    db = tmp_path / "db.sqlite"
+    make_db(
+        db,
+        sessions=[
+            ("sess_velha", None, "[WORKER] antiga", old),
+            ("sess_outra", None, "[WORKER] outra antiga", old),
+        ],
+        messages=[("m1", "sess_velha"), ("m2", "sess_outra"), ("m_orfa", None)],
+    )
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "create table part(id text primary key, message_id text, data text)"
+    )
+    connection.executemany(
+        "insert into part values (?, ?, ?)",
+        [
+            ("p1", None, "pergunta\n" + features.TURN_MARKER + '\n{"q": "..."}'),
+            ("p2", "m_inexistente", "pergunta\n" + features.TURN_MARKER),
+            ("p3", "m_orfa", "pergunta\n" + features.TURN_MARKER),
+        ],
+    )
+    connection.commit()
+    connection.close()
+    assert cli._purge_stale_worker_sessions(db_path=db) == 0
+    assert session_ids(db) == ["sess_outra", "sess_velha"]
+    assert message_ids(db) == ["m1", "m2", "m_orfa"]
+
+
 def test_purge_part_session_filled_with_message_link(tmp_path):
     # Regressão: part com session_id preenchido e colunas de vínculo presentes
     # continua usando a sessão direta da parte.
