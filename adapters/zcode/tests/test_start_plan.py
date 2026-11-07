@@ -318,25 +318,101 @@ def test_fallback_plan_rate_limit_marks(tmp_path, monkeypatch):
     assert marker.exists()
     assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
 
-def test_execute_start_plan_rate_limit_propagates_without_retry(tmp_path, monkeypatch):
+
+def _run_start_rate_limit(tmp_path, monkeypatch, *, mode, timeout, start_failures, db_provider=base.PROVIDER_ID):
+    """run_task real com runner falso: as pernas Start falham com rate_limit
+    as primeiras `start_failures` chamadas; as do plano pago respondem ok."""
+    db = tmp_path / "db.sqlite"
+    make_selection_db(db, session="sess_1", provider=db_provider)
+    monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
+    monkeypatch.setattr(features, "provider_for", lambda *a, **k: features.START_PLAN_PROVIDER_ID)
+    monkeypatch.setattr(features, "start_plan_confirmed", lambda *a, **k: True)
+    sleeps = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: sleeps.append(s))
+    calls = {"start": 0, "paid": 0}
+    def runner(command, env, deadline, limit):
+        if env.get("ZCODE_WORKER_START_PLAN_PATCHES") == "1":
+            calls["start"] += 1
+            if calls["start"] <= start_failures:
+                return 1, "", "HTTP 429 rate limit"
+            return 0, '{"sessionId":"sess_1","response":"ok"}', ""
+        calls["paid"] += 1
+        return 0, '{"sessionId":"sess_1","response":"ok"}', ""
+    args = cli_args(tmp_path, mode=mode, timeout=timeout)
+    result, code = cli.run_task(args, "fatia", db_path=db, runner=runner)
+    return result, code, calls, sleeps
+
+
+def test_start_plan_rate_limit_recovers_on_start(tmp_path, monkeypatch):
+    result, code, calls, sleeps = _run_start_rate_limit(
+        tmp_path, monkeypatch, mode="plan", timeout=600.0, start_failures=1,
+        db_provider=features.START_PLAN_PROVIDER_ID,
+    )
+    assert code == 0 and result["status"] == "ok"
+    assert result["effective"]["providerId"] == features.START_PLAN_PROVIDER_ID
+    assert "startPlanFallback" not in result
+    assert calls["start"] == 2 and calls["paid"] == 0
+    assert sleeps == [15]
+    assert not (Path(base.STATE) / features.START_PLAN_MARKER).exists()
+
+
+def test_start_plan_rate_limit_exhausted_falls_back_paid(tmp_path, monkeypatch):
+    result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="plan", timeout=600.0, start_failures=3)
+    assert code == 0 and result["status"] == "ok"
+    assert result["startPlanFallback"] == "rate_limit"
+    assert result["effective"]["providerId"] == base.PROVIDER_ID
+    assert calls["start"] == 3 and calls["paid"] == 1
+    assert sleeps == [15, 30]
+    marker = Path(base.STATE) / features.START_PLAN_MARKER
+    assert marker.exists()
+    assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
+
+
+def test_start_plan_rate_limit_deadline_goes_paid_without_sleep(tmp_path, monkeypatch):
+    # Prazo de 2 s menor que o primeiro atraso (15 s): não dorme, não reintenta
+    # e cai direto no plano pago.
+    result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="plan", timeout=2.0, start_failures=3)
+    assert code == 0 and result["status"] == "ok"
+    assert result["startPlanFallback"] == "rate_limit"
+    assert result["effective"]["providerId"] == base.PROVIDER_ID
+    assert calls["start"] == 1 and calls["paid"] == 1
+    assert sleeps == []
+
+
+def test_write_start_plan_rate_limit_keeps_exhausted(tmp_path, monkeypatch):
+    result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="edit", timeout=600.0, start_failures=3)
+    assert code == 1 and result["error"]["code"] == "start_plan_exhausted"
+    assert calls["start"] == 1 and calls["paid"] == 0
+    assert sleeps == []
+    marker = Path(base.STATE) / features.START_PLAN_MARKER
+    assert marker.exists()
+    assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
+
+def test_execute_start_plan_rate_limit_retries_then_propagates(tmp_path, monkeypatch):
     provider = tmp_path / "provider.json"
     write_provider(provider)
     monkeypatch.setattr(features.base, "PROVIDER_CONFIG", str(provider))
     monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
     monkeypatch.setattr(cli.base, "RETRY_DELAYS", (0.0, 0.0, 0.0))
     monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
+    sleeps = []
+    monkeypatch.setattr(cli.time, "sleep", lambda s: sleeps.append(s))
     calls = []
 
     def runner(command, env, deadline, limit):
         calls.append(env.get("ZCODE_WORKER_START_PLAN_PATCHES"))
         return 1, "", "HTTP 429 rate limit"
 
-    args = normalized_args(tmp_path, mode="plan")
+    # timeout folgado: sem isso o prazo de 2 s encerraria o retry antes dos
+    # atrasos do Start e o erro propagaria na primeira tentativa.
+    args = normalized_args(tmp_path, mode="plan", timeout=600.0)
     args._provider = features.START_PLAN_PROVIDER_ID
     with pytest.raises(features.FeatureError) as raised:
         cli._execute(args, "task", runner=runner)
     assert raised.value.code == "rate_limit"
-    assert calls == ["1"]
+    assert calls == ["1", "1", "1"]
+    assert sleeps == list(cli.START_PLAN_RETRY_DELAYS)
 
 def test_fallback_drift_edit_repeats(tmp_path, monkeypatch):
     ok = (0, '{"sessionId":"sess_1","response":"ok"}', "")

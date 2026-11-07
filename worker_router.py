@@ -1193,6 +1193,17 @@ def _main_impl(argv=None):
 
         if timed_out or rc == 124:
             # Circuito aberto: nao repetir automaticamente um executor sem resposta.
+            # Fatia de escrita com progresso (mesma contagem de changed_files do
+            # registro de run) nao abre circuito: executor travado nao altera
+            # arquivos; estouro com trabalho feito indica fatia grande, nao morte.
+            progress = 0
+            if args.mode != "plan" and _RUN is not None:
+                changed = _RUN.get("changed_files")
+                if isinstance(changed, int):
+                    progress = changed
+            if progress > 0:
+                _err(f"worker-ask: {name} estourou com progresso; sem cooldown (fatia grande?)")
+                _exit_timeout(f"{name}: rc=124 (timeout); parando sem fallback", name, "escrita sem fallback")
             try:
                 save_cache({name: {"wrapper": name, "until": time.time() + TIMEOUT_COOLDOWN_SECONDS,
                                    "reset_known": False, "blocked_reason": "timeout"}})

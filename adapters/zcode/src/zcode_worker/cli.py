@@ -36,6 +36,7 @@ _LAUNCHER_INCOMPATIBLE_RE = re.compile(
 )
 _LAUNCHER_INCOMPATIBLE_MESSAGE = "launcher de autenticacao incompativel com o bundle do ZCode"
 QUOTA_RETRY_DEFAULT_SECONDS = 3600
+START_PLAN_RETRY_DELAYS = (15, 30)
 WORKER_SESSION_TTL_SECONDS = 6 * 3600
 
 
@@ -288,9 +289,18 @@ def _retry_allowed(args, error, attempt, deadline):
     if args.mode != "plan" or not isinstance(error, features.FeatureError) or error.code != "rate_limit":
         return False
     if getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID:
-        # Recusa do Start Plan não é transitória: propagar rate_limit na hora
-        # marca o bloqueio e dispara o fallback pago em vez de virar timeout.
-        return False
+        # Rate limit do Start em plan é transitório (concorrência): tentar de
+        # novo com atrasos curtos antes de liberar o fallback pago. Sem prazo
+        # para o próximo atraso, devolve False para o fallback pagar rodar em
+        # vez de o erro virar timeout.
+        delays = START_PLAN_RETRY_DELAYS
+        if attempt >= len(delays):
+            return False
+        delay = float(delays[attempt])
+        if time.monotonic() + delay >= deadline:
+            return False
+        time.sleep(delay)
+        return True
     delays = tuple(base.RETRY_DELAYS)
     if attempt >= len(delays):
         return False
@@ -342,7 +352,8 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
             )
             # O loop sempre termina por return ou raise: na última tentativa
             # _retry_allowed devolve False e o erro é propagado.
-            for attempt in range(len(base.RETRY_DELAYS) + 1):  # pragma: no branch
+            _retry_budget = max(len(base.RETRY_DELAYS), len(START_PLAN_RETRY_DELAYS))
+            for attempt in range(_retry_budget + 1):  # pragma: no branch
                 try:
                     if args.mode in {"edit", "yolo"}:
                         # A CLI pode ter escrito antes de devolver um erro ou

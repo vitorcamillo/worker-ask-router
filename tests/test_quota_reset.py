@@ -211,6 +211,25 @@ def test_timeout_opens_circuit_for_next_call(fake_env):
     assert run_cli(fake_env, ["--mode", "plan", "task"], {"WORKER_ASK_NO_MUSE": "1"}).stdout == b"READY:opencode-ask"
 
 
+def test_write_timeout_with_progress_skips_circuit(fake_env):
+    result = run_cli(
+        fake_env,
+        ["--mode", "write", "--allowed-file", "a.txt", "--step-timeout", "0.1", "task"],
+        {
+            "FAKE_MODE_ZCODE_WORKER": "writesleep",
+            "FAKE_WRITE_REL": "a.txt",
+            "FAKE_WRITE_CONTENT": "progresso",
+            "FAKE_SLEEP": "2",
+            "WORKER_ASK_NO_MUSE": "1",
+        },
+    )
+    assert result.returncode == 124
+    assert "estourou com progresso; sem cooldown" in result.stderr.decode()
+    assert "zcode-worker" not in w.load_cache()
+    # Sem cooldown: a chamada seguinte volta a executar o zcode-worker.
+    assert run_cli(fake_env, ["--mode", "plan", "task"], {"WORKER_ASK_NO_MUSE": "1"}).stdout == b"READY:zcode-worker"
+
+
 def test_successful_explicit_retry_clears_unknown_block(fake_env):
     w.save_cache(
         {
