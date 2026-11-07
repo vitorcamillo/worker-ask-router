@@ -32,6 +32,7 @@ ORCHESTRATORS = ("codex", "claude", "zcode", "muse", "opencode")
 TIMEOUT_DIRECTIVE = "worker-ask: execucao interrompida por timeout; nao indica cota nem informa data de liberacao. Revise o estado da tarefa antes de uma nova tentativa."
 DEFAULT_MIN_TIMEOUT = 300.0
 TIMEOUT_COOLDOWN_SECONDS = 300.0
+DEFAULT_ZCODE_QUEUE_TIMEOUT = 600.0
 
 _CURRENT_PROC = None
 _INTERRUPTED = False
@@ -239,6 +240,19 @@ def _min_timeout():
         return DEFAULT_MIN_TIMEOUT
     if not math.isfinite(value) or value < 0:
         return DEFAULT_MIN_TIMEOUT
+    return value
+
+
+def _zcode_queue_timeout():
+    raw = os.environ.get("WORKER_ASK_ZCODE_QUEUE_TIMEOUT")
+    if raw is None:
+        return DEFAULT_ZCODE_QUEUE_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_ZCODE_QUEUE_TIMEOUT
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_ZCODE_QUEUE_TIMEOUT
     return value
 
 
@@ -906,7 +920,8 @@ def build_argv(name, path, mode, cwd):
     cwd_abs = os.path.abspath(cwd)
     if name == "zcode-worker":
         m = "edit" if mode == "write" else "plan"
-        return [path, "--mode", m, "--model", "glm-5.3-flash", "--effort", "high", "--cwd", cwd_abs]
+        return [path, "--mode", m, "--model", "glm-5.3-flash", "--effort", "high", "--cwd", cwd_abs,
+                "--queue-timeout", f"{_zcode_queue_timeout():g}"]
     if name == "muse-ask":
         return [path, "--mode", mode, "--model", "muse-spark-1.3-contributor", "--effort", "high", "--cwd", cwd_abs]
     if name == "opencode-ask":
@@ -1173,7 +1188,10 @@ def _main_impl(argv=None):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
-        budget = min(args.step_timeout, remaining)
+        # zcode-worker espera na fila antes de executar; a espera nao consome o
+        # tempo de execucao da fatia, so o prazo total.
+        queue_extra = _zcode_queue_timeout() if name == "zcode-worker" else 0.0
+        budget = min(args.step_timeout + queue_extra, remaining)
 
         argv_list = build_argv(name, path, args.mode, cwd)
         model = argv_list[argv_list.index("--model") + 1] if "--model" in argv_list else None
