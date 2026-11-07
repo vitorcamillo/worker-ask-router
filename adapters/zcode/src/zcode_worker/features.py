@@ -156,6 +156,7 @@ def parse_args(argv: list[str] | tuple[str, ...]) -> argparse.Namespace:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--conversation", action="store_true")
+    parser.add_argument("--chat", action="store_true")
     parser.add_argument("--doctor", action="store_true")
     parser.add_argument("--list-models", action="store_true")
     parser.add_argument("--saida")
@@ -174,6 +175,20 @@ def parse_args(argv: list[str] | tuple[str, ...]) -> argparse.Namespace:
         raise FeatureError("tarefa e --spec são mutuamente exclusivos")
     if parsed.status and parsed.cancel:
         raise FeatureError("status e cancel são mutuamente exclusivos")
+    if parsed.chat:
+        # Conversa pura: sem protocolo de turnos, sem retomar sessão e sem
+        # job em background (a ponte HTTP controla o ciclo de vida).
+        conflicts = [
+            "--" + name
+            for name, enabled in (
+                ("conversation", parsed.conversation),
+                ("resume", bool(parsed.resume)),
+                ("saida", bool(parsed.saida)),
+            )
+            if enabled
+        ]
+        if conflicts:
+            raise FeatureError("--chat não combina com " + ", ".join(conflicts))
     controls = {
         "doctor": parsed.doctor,
         "list_models": parsed.list_models,
@@ -832,6 +847,7 @@ def build_cli_argv(
     disallowed_tools: list[str] | tuple[str, ...] = (),
     cli_path: str | None = None,
     conversation: bool = False,
+    chat: bool = False,
 ) -> list[str]:
     """Monta argv sem shell e aplica a política de ferramentas por modo."""
 
@@ -845,7 +861,9 @@ def build_cli_argv(
         tools = list(base._headless_tools()) + extra
     else:
         tools = extra
-    prompt = base.PREAMBULO + task
+    # Modo chat (pontes HTTP): o prompt é exatamente a tarefa, sem preâmbulo
+    # de worker nem protocolo de turnos; o restante da política é igual.
+    prompt = task if chat else base.PREAMBULO + task
     if conversation:
         prompt += CONVERSATION_PROTOCOL_INSTRUCTION
     argv = [
@@ -900,6 +918,7 @@ def public_namespace(args: argparse.Namespace) -> SimpleNamespace:
         raise FeatureError("limite de saída inválido")
     values["max_output_bytes"] = max_output_bytes
     values["conversation"] = bool(getattr(args, "conversation", False))
+    values["chat"] = bool(getattr(args, "chat", False))
     return SimpleNamespace(**values)
 
 

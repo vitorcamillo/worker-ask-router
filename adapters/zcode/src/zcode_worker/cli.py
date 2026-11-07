@@ -349,6 +349,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
                 attachments=args.attachments,
                 disallowed_tools=args.disallowed_tools,
                 conversation=bool(getattr(args, "conversation", False)),
+                chat=bool(getattr(args, "chat", False)),
             )
             # O loop sempre termina por return ou raise: na última tentativa
             # _retry_allowed devolve False e o erro é propagado.
@@ -690,6 +691,7 @@ def _probe_start_plan(args, *, db_path=None, runner=None, total_deadline=None):
     probe_args.resume = None
     probe_args.attachments = []
     probe_args.conversation = False
+    probe_args.chat = False
     probe_args.timeout = min(args.timeout, 120)
     try:
         raw = _execute(
@@ -803,6 +805,7 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     resume=args.resume,
                     attachments=args.attachments,
                     disallowed_tools=args.disallowed_tools,
+                    chat=bool(getattr(args, "chat", False)),
                 )
                 result = {
                     "schemaVersion": 1,
