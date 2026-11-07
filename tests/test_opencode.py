@@ -96,6 +96,10 @@ class OpencodeAskTests(unittest.TestCase):
         catalog = {
             "opencode-go": {
                 "models": {
+                    "gpt-6-luna": {"cost": {"output": 0.5}},
+                    "claude-haiku-5-5": {"cost": {"output": 0.5}},
+                    "mimo-v2.6-flash": {"cost": {"output": 0.28}},
+                    "qwen3.8-flash": {"cost": {"output": 0.47}},
                     "deepseek-v4.1-flash": {"cost": {"output": 0.6}},
                     "expensive": {"cost": {"output": 15.0}},
                 }
@@ -132,29 +136,51 @@ class OpencodeAskTests(unittest.TestCase):
         )
 
     def test_stderr_only_quota_triggers_beam(self):
-        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode/deepseek-v4.1-flash-free"}
+        # Cota detectada so no stderr em todos os degraus antes do beam: a cadeia chega nele.
+        antes_beam = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 "
+                      "opencode-go/mimo-v2.6-flash opencode-go/qwen3.8-flash "
+                      "opencode-go/deepseek-v4.1-flash opencode/deepseek-v4.1-flash-free")
+        env_extra = {"FAKE_OC_QUOTA_MODELS": antes_beam}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = self.log.read_text().splitlines() if self.log.exists() else []
         self.assertIn("opencode-go/beam-free", logged)
 
-    def test_quota_both_free_triggers_go_cheap(self):
+    def test_quota_on_frees_only_no_fallback(self):
+        # Com os Go saudaveis, cota nos free nem chega a ser atingida: o auto roda o padrao.
         env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode/deepseek-v4.1-flash-free opencode-go/beam-free"}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        logged = [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
+        self.assertEqual(logged, ["opencode-go/gpt-6-luna"])
+
+    def test_all_go_quota_reaches_free(self):
+        # Cota em todos os Go baratos do auto: a cadeia chega no free do provider opencode.
+        todos_go = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 "
+                    "opencode-go/mimo-v2.6-flash opencode-go/qwen3.8-flash "
+                    "opencode-go/deepseek-v4.1-flash")
+        env_extra = {"FAKE_OC_QUOTA_MODELS": todos_go}
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = self.log.read_text().splitlines() if self.log.exists() else []
-        self.assertIn("opencode-go/deepseek-v4.1-flash", logged)
+        self.assertIn("opencode/deepseek-v4.1-flash-free", logged)
+        self.assertNotIn("opencode-go/beam-free", logged)
 
     # Regressão: "Model unavailable" (provider.no-route) também dispara o fallback.
-    def test_noroute_free_triggers_beam(self):
-        env_extra = {"FAKE_OC_NOROUTE_MODELS": "opencode/deepseek-v4.1-flash-free"}
+    def test_noroute_chain_triggers_beam(self):
+        antes_beam = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 "
+                      "opencode-go/mimo-v2.6-flash opencode-go/qwen3.8-flash "
+                      "opencode-go/deepseek-v4.1-flash opencode/deepseek-v4.1-flash-free")
+        env_extra = {"FAKE_OC_NOROUTE_MODELS": antes_beam}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = self.log.read_text().splitlines() if self.log.exists() else []
         self.assertIn("opencode-go/beam-free", logged)
 
     def test_noroute_all_exits_75(self):
-        todos = "opencode/deepseek-v4.1-flash-free opencode-go/beam-free opencode-go/deepseek-v4.1-flash"
+        todos = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 opencode-go/mimo-v2.6-flash "
+                 "opencode-go/qwen3.8-flash opencode-go/deepseek-v4.1-flash "
+                 "opencode/deepseek-v4.1-flash-free opencode-go/beam-free")
         env_extra = {"FAKE_OC_NOROUTE_MODELS": todos}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 75, (r.returncode, r.stderr))
@@ -171,28 +197,65 @@ class OpencodeAskTests(unittest.TestCase):
         self.assertEqual(logged, ["opencode-go/deepseek-v4.1-flash"])
 
     def test_auto_go_expensive_blocked(self):
-        catalog = {"opencode-go": {"models": {"deepseek-v4.1-flash": {"cost": {"output": 15.0}}}}}
+        # deepseek-v4.1-flash caro no catalogo: e pulado no meio da cadeia, sem executar.
+        catalog = {"opencode-go": {"models": {
+            "gpt-6-luna": {"cost": {"output": 0.5}},
+            "claude-haiku-5-5": {"cost": {"output": 0.5}},
+            "mimo-v2.6-flash": {"cost": {"output": 0.28}},
+            "qwen3.8-flash": {"cost": {"output": 0.47}},
+            "deepseek-v4.1-flash": {"cost": {"output": 15.0}},
+        }}}
         (self.home / ".cache" / "opencode" / "models.json").write_text(json.dumps(catalog))
-        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode/deepseek-v4.1-flash-free opencode-go/beam-free"}
+        quota = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 opencode-go/mimo-v2.6-flash "
+                 "opencode-go/qwen3.8-flash opencode/deepseek-v4.1-flash-free opencode-go/beam-free")
+        env_extra = {"FAKE_OC_QUOTA_MODELS": quota}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 75, (r.returncode, r.stderr))
         logged = self.log.read_text().splitlines() if self.log.exists() else []
         self.assertNotIn("opencode-go/deepseek-v4.1-flash", logged)
+        self.assertIn("bloqueado pela politica", r.stderr)
 
-    def test_auto_go_no_price_blocked(self):
+    def test_auto_no_price_starts_free(self):
+        # Sem catalogo, todo Go fica sem preco: o auto comeca no free (nao morre com rc 1).
         (self.home / ".cache" / "opencode" / "models.json").write_text(json.dumps({}))
-        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode/deepseek-v4.1-flash-free opencode-go/beam-free"}
-        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
-        self.assertEqual(r.returncode, 75, (r.returncode, r.stderr))
-        logged = self.log.read_text().splitlines() if self.log.exists() else []
-        self.assertNotIn("opencode-go/deepseek-v4.1-flash", logged)
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"])
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        logged = [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
+        self.assertEqual(logged, ["opencode/deepseek-v4.1-flash-free"])
+        self.assertIn("auto comeca em", r.stderr)
+
+    def test_explicit_go_no_price_blocked(self):
+        # Modelo Go pedido explicitamente sem preco no catalogo: bloqueado (rc 1), sem fallback.
+        (self.home / ".cache" / "opencode" / "models.json").write_text(json.dumps({}))
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "--model", "go-luna", "task"])
+        self.assertEqual(r.returncode, 1, (r.returncode, r.stderr))
+        logged = [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
+        self.assertEqual(logged, [])
+        self.assertIn("bloqueado", r.stderr)
+
+    def test_auto_luna_expensive_starts_haiku(self):
+        # Luna caro no catalogo: o auto comeca no proximo degrau (claude-haiku-5-5), sem rc 1.
+        catalog = {"opencode-go": {"models": {
+            "gpt-6-luna": {"cost": {"output": 15.0}},
+            "claude-haiku-5-5": {"cost": {"output": 0.5}},
+            "mimo-v2.6-flash": {"cost": {"output": 0.28}},
+            "qwen3.8-flash": {"cost": {"output": 0.47}},
+            "deepseek-v4.1-flash": {"cost": {"output": 0.6}},
+        }}}
+        (self.home / ".cache" / "opencode" / "models.json").write_text(json.dumps(catalog))
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"])
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        logged = [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
+        self.assertEqual(logged, ["opencode-go/claude-haiku-5-5"])
+        self.assertIn("auto comeca em opencode-go/claude-haiku-5-5", r.stderr)
 
     def test_auto_go_cheap_runs(self):
-        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode/deepseek-v4.1-flash-free opencode-go/beam-free"}
+        # Primeiro degrau do auto em cota: cai para o segundo Go barato (claude-haiku-5-5).
+        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode-go/gpt-6-luna"}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = self.log.read_text().splitlines() if self.log.exists() else []
-        self.assertIn("opencode-go/deepseek-v4.1-flash", logged)
+        self.assertIn("opencode-go/claude-haiku-5-5", logged)
 
     def test_go_expensive_blocked(self):
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "--model", "opencode-go/expensive", "task"])
@@ -223,7 +286,10 @@ class OpencodeAskTests(unittest.TestCase):
         self.assertEqual(r.returncode, 124, (r.returncode, r.stderr))
 
     def test_long_stderr_quota_sigpipe(self):
-        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode/deepseek-v4.1-flash-free", "FAKE_OC_STDERR_SIZE": "2000000"}
+        antes_beam = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 "
+                      "opencode-go/mimo-v2.6-flash opencode-go/qwen3.8-flash "
+                      "opencode-go/deepseek-v4.1-flash opencode/deepseek-v4.1-flash-free")
+        env_extra = {"FAKE_OC_QUOTA_MODELS": antes_beam, "FAKE_OC_STDERR_SIZE": "2000000"}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra, timeout=60)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
 
