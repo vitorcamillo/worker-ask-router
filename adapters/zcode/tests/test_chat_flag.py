@@ -114,8 +114,32 @@ def test_parse_args_chat_rejects_incompatible_flags(tmp_path, argv):
         features.parse_args(argv + ["--cwd", str(tmp_path), "task"])
 
 
+@pytest.mark.parametrize("argv", [["--mode", "edit"], ["--mode", "yolo"], []])
+def test_parse_args_chat_requires_explicit_plan(tmp_path, argv):
+    # Sem --mode plan (inclusive o padrão edit) o chat seria recusado: o prompt
+    # sem preâmbulo não pode rodar com ferramentas de escrita.
+    with pytest.raises(features.FeatureError, match="--chat exige --mode plan"):
+        features.parse_args(["--cwd", str(tmp_path), "--chat"] + argv + ["task"])
+
+
+def test_parse_args_chat_accepts_spec_in_plan(tmp_path):
+    spec = tmp_path / "fatia.md"
+    spec.write_text("fatia de conversa", encoding="utf-8")
+    parsed = features.parse_args(
+        ["--cwd", str(tmp_path), "--chat", "--mode", "plan", "--spec", str(spec)]
+    )
+    assert parsed.chat is True and parsed.spec == str(spec)
+    assert features.read_task(parsed) == "fatia de conversa"
+
+
+def test_build_cli_argv_chat_refuses_non_plan_modes(tmp_path):
+    for mode in ("edit", "yolo"):
+        with pytest.raises(features.FeatureError, match="--chat exige --mode plan"):
+            features.build_cli_argv("tarefa", str(tmp_path), mode, "glm-5.3-flash", "high", chat=True)
+
+
 def test_parse_args_and_namespace_carry_chat(tmp_path):
-    parsed = features.parse_args(["--cwd", str(tmp_path), "--chat", "task"])
+    parsed = features.parse_args(["--cwd", str(tmp_path), "--chat", "--mode", "plan", "task"])
     assert parsed.chat is True
     normalized = features.public_namespace(parsed)
     assert normalized.chat is True

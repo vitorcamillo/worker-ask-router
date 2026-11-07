@@ -189,6 +189,10 @@ def parse_args(argv: list[str] | tuple[str, ...]) -> argparse.Namespace:
         ]
         if conflicts:
             raise FeatureError("--chat não combina com " + ", ".join(conflicts))
+        # Sem o preâmbulo de worker (regras de segurança), o chat só pode rodar em
+        # plan: edit/yolo (inclusive o padrão edit) exigiriam essas regras.
+        if parsed.mode != "plan":
+            raise FeatureError("--chat exige --mode plan")
     controls = {
         "doctor": parsed.doctor,
         "list_models": parsed.list_models,
@@ -863,6 +867,8 @@ def build_cli_argv(
         tools = extra
     # Modo chat (pontes HTTP): o prompt é exatamente a tarefa, sem preâmbulo
     # de worker nem protocolo de turnos; o restante da política é igual.
+    if chat and mode != "plan":
+        raise FeatureError("--chat exige --mode plan")
     prompt = task if chat else base.PREAMBULO + task
     if conversation:
         prompt += CONVERSATION_PROTOCOL_INSTRUCTION
