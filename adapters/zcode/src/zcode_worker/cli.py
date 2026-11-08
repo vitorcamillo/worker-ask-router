@@ -199,6 +199,26 @@ def _chunk_sink(event_sink):
     return on_chunk
 
 
+def _fail_attempt(args, stdout, returncode, stderr, *, db_path=None) -> features.FeatureError:
+    """Classifica a tentativa falha e apaga a sessão extraída do stdout.
+
+    Exceção: Start em edit/yolo com rate_limit guarda o stdout em
+    ``args._rate_limit_stdout`` e adia a exclusão, porque run_task precisa da
+    sessão viva no DB para checar efeitos antes de decidir entre repetir a
+    fatia e cair para o plano pago; quem consome o stdout faz a exclusão.
+    """
+    failure = _classify_process_failure(returncode, stderr)
+    if (
+        failure.code == "rate_limit"
+        and getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID
+        and args.mode in {"edit", "yolo"}
+    ):
+        args._rate_limit_stdout = stdout
+        return failure
+    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
+    return failure
+
+
 def _classify_process_failure(returncode: int, stderr: str) -> features.FeatureError:
     # O conteúdo só é usado para classificação local; nunca é devolvido ao operador.
     if returncode == 124:
@@ -276,6 +296,7 @@ def _start_attempt_had_effects(cwd: str, since_ms: int, db_path=None) -> bool:
 
         uri = f"file:{quote(os.path.abspath(path), safe='/')}?mode=ro"
         connection = sqlite3.connect(uri, uri=True, timeout=2.0)
+        columns = {row[1] for row in connection.execute("pragma table_info(session)")}
         sessions = connection.execute(
             "select id from session"
             " where time_created >= ?"
@@ -285,7 +306,25 @@ def _start_attempt_had_effects(cwd: str, since_ms: int, db_path=None) -> bool:
         ).fetchall()
         if not sessions:
             return True  # sessão sumiu (apagada na falha) ou não achada: sem prova, conservador
-        for (session_id,) in sessions:
+        ids = [session_id for (session_id,) in sessions]
+        if "parent_id" in columns:
+            # Subagentes do ZCode criam sessões filhas (parent_id) com títulos
+            # sem o prefixo [WORKER; escritas delas também são efeitos desta
+            # tentativa. Filha só pode existir depois do pai, então o marco
+            # de tempo do pai já cobre toda a descendência.
+            frontier = ids
+            while frontier:
+                placeholders = ",".join("?" * len(frontier))
+                frontier = [
+                    child_id
+                    for (child_id,) in connection.execute(
+                        f"select id from session where parent_id in ({placeholders})",
+                        frontier,
+                    )
+                    if child_id not in ids
+                ]
+                ids.extend(frontier)
+        for session_id in ids:
             tools = connection.execute(
                 "select read_only from tool_usage where session_id = ?", (session_id,)
             ).fetchall()
@@ -407,8 +446,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
                         command, env, execution_deadline, args.max_output_bytes
                     )
                     if isinstance(response, tuple) and len(response) == 3 and response[0] != 0:
-                        _delete_session_from_stdout(response[1], db_path=db_path, keep=(args.resume,))
-                        raise _classify_process_failure(response[0], response[2])
+                        raise _fail_attempt(args, response[1], response[0], response[2], db_path=db_path)
                     return response
                 except features.FeatureError as error:
                     if _retry_allowed(args, error, attempt, execution_deadline):
@@ -906,8 +944,7 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
                 if returncode != 0:
-                    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
-                    raise _classify_process_failure(returncode, stderr)
+                    raise _fail_attempt(args, stdout, returncode, stderr, db_path=db_path)
                 try:
                     payload = features.validate_response(features.decode_response(stdout))
                     effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)
@@ -933,10 +970,20 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     elif _code == "rate_limit":
                         features.mark_start_plan_unavailable("rate_limit")
                     _fallback = _code
-                    if args.mode != "plan" and (
+                    # A checagem de efeitos precisa da sessão ainda viva no
+                    # DB: sem ela a detecção vira conservadora (True) e o
+                    # fallback para o plano pago praticamente nunca roda.
+                    _exhausted = args.mode != "plan" and (
                         _code != "rate_limit"
                         or _start_attempt_had_effects(args.cwd, start_ms, db_path=db_path)
-                    ):
+                    )
+                    # Exclusão adiada por _fail_attempt: agora que os efeitos
+                    # já foram lidos, a sessão falha pode ser apagada.
+                    _deferred_stdout = getattr(args, "_rate_limit_stdout", None)
+                    args._rate_limit_stdout = None
+                    if _deferred_stdout is not None:
+                        _delete_session_from_stdout(_deferred_stdout, db_path=db_path, keep=(args.resume,))
+                    if _exhausted:
                         raise features.FeatureError(
                             "Start Plan esgotado durante a fatia; revise o diff e relance (a próxima chamada usa o plano)",
                             "start_plan_exhausted",
@@ -946,8 +993,7 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
                 if returncode != 0:
-                    _delete_session_from_stdout(stdout, db_path=db_path, keep=(args.resume,))
-                    raise _classify_process_failure(returncode, stderr)
+                    raise _fail_attempt(args, stdout, returncode, stderr, db_path=db_path)
                 try:
                     payload = features.validate_response(features.decode_response(stdout))
                     effective = features.verify_effective(payload, args.model, args.effort, db_path=db_path, provider=args._provider)

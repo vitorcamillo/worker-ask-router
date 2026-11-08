@@ -405,6 +405,41 @@ def test_write_start_plan_rate_limit_without_effects_falls_back_paid(tmp_path, m
     assert sleeps == []
 
 
+def test_write_start_plan_rate_limit_effects_checked_before_delete(tmp_path, monkeypatch):
+    # Sem dublê de _start_attempt_had_effects: a sessão falha (com sessionId
+    # no stdout, só leituras) precisa ser lida pelo DB antes de ser apagada,
+    # ou a detecção vira conservadora e o plano pago nunca roda no edit.
+    db = tmp_path / "db.sqlite"
+    make_selection_db(db, session="sess_1", provider=base.PROVIDER_ID)
+    provider = tmp_path / "provider.json"
+    write_provider(provider)
+    monkeypatch.setattr(features.base, "PROVIDER_CONFIG", str(provider))
+    monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
+    monkeypatch.setattr(features, "provider_for", lambda *a, **k: features.START_PLAN_PROVIDER_ID)
+    monkeypatch.setattr(features, "start_plan_confirmed", lambda *a, **k: True)
+    calls = {"start": 0, "paid": 0}
+    def runner(command, env, deadline, limit):
+        if env.get("ZCODE_WORKER_START_PLAN_PATCHES") == "1":
+            calls["start"] += 1
+            # A CLI do Start criou a sessão da fatia e só fez leituras antes
+            # de falhar por limite de concorrência.
+            make_start_busy_db(
+                db, directory=str(tmp_path), time_created=int(time.time() * 1000), tools=(("Read", 1),)
+            )
+            return 1, '{"sessionId":"sess_w","response":""}', "HTTP 429 rate limit"
+        calls["paid"] += 1
+        return 0, '{"sessionId":"sess_1","response":"ok"}', ""
+    args = cli_args(tmp_path, mode="edit", timeout=600.0)
+    result, code = cli.run_task(args, "fatia", db_path=db, runner=runner)
+    assert code == 0 and result["status"] == "ok"
+    assert result["startPlanFallback"] == "rate_limit"
+    assert result["effective"]["providerId"] == base.PROVIDER_ID
+    assert calls["start"] == 1 and calls["paid"] == 1
+    marker = Path(base.STATE) / features.START_PLAN_MARKER
+    assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
+
+
 def test_classify_start_busy_is_rate_limit():
     assert cli._classify_process_failure(1, "user concurrency limit exceeded").code == "rate_limit"
     assert cli._classify_process_failure(
@@ -414,11 +449,11 @@ def test_classify_start_busy_is_rate_limit():
     assert cli._classify_process_failure(1, "algo qualquer").code == "cli_failed"
 
 
-def make_start_busy_db(path: Path, *, directory, title="[WORKER] fatia", time_created=5_000, tools=(("Write", 0),)):
+def make_start_busy_db(path: Path, *, directory, title="[WORKER] fatia", time_created=5_000, tools=(("Write", 0),), parent_id=None):
     connection = sqlite3.connect(path)
-    connection.execute("create table session(id, directory, title, time_created)")
+    connection.execute("create table session(id, directory, title, time_created, parent_id)")
     connection.execute(
-        "insert into session values (?, ?, ?, ?)", ("sess_w", directory, title, time_created)
+        "insert into session values (?, ?, ?, ?, ?)", ("sess_w", directory, title, time_created, parent_id)
     )
     connection.execute("create table tool_usage(session_id, tool_name, read_only)")
     for tool_name, read_only in tools:
@@ -447,12 +482,48 @@ def test_start_attempt_had_effects_null_read_only_true(tmp_path):
     assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
 
 
-def test_start_attempt_had_effects_other_cwd_or_older_session_false(tmp_path):
+def test_start_attempt_had_effects_other_cwd_or_older_session_true(tmp_path):
     db = tmp_path / "db.sqlite"
     make_start_busy_db(db, directory="/outra/pasta")
     assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
     make_start_busy_db(tmp_path / "db2.sqlite", directory=str(tmp_path), time_created=500)
     assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=tmp_path / "db2.sqlite") is True
+
+
+def test_start_attempt_had_effects_subagent_write_true(tmp_path):
+    # Sessão filha de subagente (título sem prefixo [WORKER) escreveu:
+    # precisa contar como efeito mesmo sem escrita na sessão pai.
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory=str(tmp_path), tools=(("Read", 1),))
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "insert into session values (?, ?, ?, ?, ?)",
+        ("sess_sub", str(tmp_path), "Você é auditor da fatia", 6_000, "sess_w"),
+    )
+    connection.execute("insert into tool_usage values (?, ?, ?)", ("sess_sub", "Write", 0))
+    connection.commit()
+    connection.close()
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
+
+
+def test_start_attempt_had_effects_subagent_read_only_false(tmp_path):
+    # Filhas e neta apenas com leituras: sem efeitos.
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory=str(tmp_path), tools=(("Read", 1),))
+    connection = sqlite3.connect(db)
+    connection.execute(
+        "insert into session values (?, ?, ?, ?, ?)",
+        ("sess_sub", "/outro/dir", "Auditoria da fatia", 6_000, "sess_w"),
+    )
+    connection.execute("insert into tool_usage values (?, ?, ?)", ("sess_sub", "Glob", 1))
+    connection.execute(
+        "insert into session values (?, ?, ?, ?, ?)",
+        ("sess_neto", "/outro/dir", "Exploração", 7_000, "sess_sub"),
+    )
+    connection.execute("insert into tool_usage values (?, ?, ?)", ("sess_neto", "Read", 1))
+    connection.commit()
+    connection.close()
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is False
 
 
 def test_start_attempt_had_effects_missing_db_is_true(tmp_path):
