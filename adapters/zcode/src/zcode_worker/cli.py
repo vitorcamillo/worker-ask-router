@@ -41,6 +41,10 @@ _START_BUSY_RE = re.compile(r"concurrency\s+limit|Start Plan is busy|model_rate_
 QUOTA_RETRY_DEFAULT_SECONDS = 3600
 START_PLAN_RETRY_DELAYS = (15, 30)
 WORKER_SESSION_TTL_SECONDS = 6 * 3600
+APP_TASKS_INDEX = os.environ.get(
+    "ZCODE_WORKER_APP_TASKS_INDEX",
+    os.path.expanduser("~/.zcode/v2/tasks-index.sqlite"),
+)
 
 
 def _kill(process) -> None:
@@ -764,6 +768,56 @@ def _purge_stale_worker_sessions(
             connection.close()
 
 
+def _archive_app_worker_tasks(*, index_path=None) -> int:
+    """Arquiva no índice do app as tarefas ``[WORKER...]`` (best-effort).
+
+    O app desktop lista as tarefas por um índice próprio
+    (``~/.zcode/v2/tasks-index.sqlite``) que não acompanha o expurgo das
+    sessões no DB do zcode-cli; sem isso, tarefas de worker já encerradas
+    continuam aparecendo na lista do app. Marca ``archived=1`` (e atualiza
+    ``updated_at`` quando a coluna existe) apenas em títulos que começam com
+    ``[WORKER``; nunca toca em linha de outro título. Qualquer falha devolve
+    0 silenciosamente.
+    """
+    from urllib.parse import quote
+
+    import sqlite3
+
+    path = os.fspath(index_path or APP_TASKS_INDEX)
+    if not os.path.exists(path):
+        return 0
+    connection = None
+    try:
+        uri = f"file:{quote(os.path.abspath(path), safe='/')}?mode=rw"
+        connection = sqlite3.connect(uri, uri=True, timeout=2.0)
+        connection.execute("PRAGMA busy_timeout=2000")
+        columns = {
+            str(row[1])
+            for row in connection.execute("pragma table_info(tasks)").fetchall()
+        }
+        if not {"title", "archived"} <= columns:
+            return 0
+        now_ms = int(time.time() * 1000)
+        with connection:
+            if "updated_at" in columns:
+                updated = connection.execute(
+                    "update tasks set archived=1, updated_at=?"
+                    " where title like '[WORKER%' and archived=0",
+                    (now_ms,),
+                ).rowcount
+            else:
+                updated = connection.execute(
+                    "update tasks set archived=1"
+                    " where title like '[WORKER%' and archived=0"
+                ).rowcount
+        return updated
+    except (OSError, sqlite3.Error, ValueError):
+        return 0
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def _probe_start_plan(args, *, db_path=None, runner=None, total_deadline=None):
     """Sonda o Start Plan em modo plan antes de edit/yolo."""
 
@@ -853,6 +907,9 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 if _status == "ok":
                     # Fatia encerrada: apaga a sessão do worker para não acumular.
                     _delete_session(payload.get("sessionId"), db_path=db_path)
+                    with contextlib.suppress(Exception):
+                        # A tarefa recém-concluída também sai da lista do app.
+                        _archive_app_worker_tasks()
                     if _effective.get("providerId") == features.START_PLAN_PROVIDER_ID:
                         features.mark_start_plan_confirmed()
                 _emit(event_sink, {"kind": "turn_end", "status": _status, "exitCode": _exit_code})
@@ -905,6 +962,8 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
             # para ser validada em vez de virar resume_mismatch.
             with contextlib.suppress(Exception):
                 _purge_stale_worker_sessions(db_path=db_path, keep=(args.resume,))
+                # O expurgo acima não alcança o índice próprio do app desktop.
+                _archive_app_worker_tasks()
             probe_fallback = None
             if (
                 args._provider == features.START_PLAN_PROVIDER_ID

@@ -24,4 +24,5 @@ def _isolated_worker_environment(monkeypatch):
     for name in ("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "ZCODE_DATA_BASE_DIR"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ZCODE_WORKER_START_PLAN", "0")
+    monkeypatch.setattr("zcode_worker.cli.APP_TASKS_INDEX", "/nonexistent/zcode-worker-tests/tasks-index.sqlite")
     yield
