@@ -136,15 +136,44 @@ def test_e2e_quota_persists_and_second_call_skips_without_retry(fake_env):
 
 
 def test_unknown_reset_does_not_hammer_worker(fake_env):
+    before = time.time()
     env = {"FAKE_RC_ZCODE_WORKER": "75", "WORKER_ASK_NO_MUSE": "1"}
     assert run_cli(fake_env, ["--mode", "plan", "task"], env).returncode == 0
     entry = w.load_cache()["zcode-worker"]
-    assert entry["until"] is None and entry["reset_known"] is False
+    assert entry["reset_known"] is False
+    assert entry["blocked_reason"] == "quota"
+    assert before + w.UNKNOWN_RESET_COOLDOWN_SECONDS - 5 <= entry["until"] <= time.time() + w.UNKNOWN_RESET_COOLDOWN_SECONDS + 5
     assert run_cli(fake_env, ["--mode", "plan", "task"], {"WORKER_ASK_NO_MUSE": "1"}).stdout == b"READY:opencode-ask"
     assert (
         run_cli(fake_env, ["--retry-exhausted", "--mode", "plan", "task"]).stdout
         == b"READY:zcode-worker"
     )
+
+
+def test_expired_unknown_quota_allows_retry(fake_env):
+    env = {"FAKE_RC_ZCODE_WORKER": "75", "WORKER_ASK_NO_MUSE": "1"}
+    assert run_cli(fake_env, ["--mode", "plan", "task"], env).returncode == 0
+    state = fake_env["state"] / "worker-ask/cache.json"
+    data = json.loads(state.read_text())
+    data["zcode-worker"]["until"] = time.time() - 1
+    state.write_text(json.dumps(data))
+    log = fake_env["tmp"] / "calls"
+    log.write_text("")
+    assert run_cli(fake_env, ["--mode", "plan", "task"], {"FAKE_LOG": str(log), "WORKER_ASK_NO_MUSE": "1"}).stdout == b"READY:zcode-worker"
+
+
+def test_unknown_reset_cooldown_env_override(fake_env, monkeypatch):
+    monkeypatch.setenv("WORKER_ASK_UNKNOWN_RESET_COOLDOWN", "120")
+    before = time.time()
+    env = {"FAKE_RC_ZCODE_WORKER": "75", "WORKER_ASK_NO_MUSE": "1"}
+    assert run_cli(fake_env, ["--mode", "plan", "task"], env).returncode == 0
+    entry = w.load_cache()["zcode-worker"]
+    assert before + 120 - 5 <= entry["until"] <= time.time() + 120 + 5
+    # Valor invalido cai no padrao: nova tentativa regrava com o cooldown default.
+    monkeypatch.setenv("WORKER_ASK_UNKNOWN_RESET_COOLDOWN", "nao-numero")
+    assert run_cli(fake_env, ["--retry-exhausted", "--mode", "plan", "task"], env).returncode == 0
+    entry = w.load_cache()["zcode-worker"]
+    assert entry["until"] > before + w.UNKNOWN_RESET_COOLDOWN_SECONDS - 5
 
 
 def test_helper_emits_only_timestamp(tmp_path):
@@ -235,8 +264,9 @@ def test_successful_explicit_retry_clears_unknown_block(fake_env):
         {
             "zcode-worker": {
                 "wrapper": "zcode-worker",
-                "until": None,
+                "until": time.time() + w.UNKNOWN_RESET_COOLDOWN_SECONDS,
                 "reset_known": False,
+                "blocked_reason": "quota",
             }
         }
     )
@@ -249,7 +279,12 @@ def test_successful_explicit_retry_clears_unknown_block(fake_env):
 
 
 def test_concurrent_new_block_survives_old_success(fake_env):
-    unknown = {"wrapper": "zcode-worker", "until": None, "reset_known": False}
+    unknown = {
+        "wrapper": "zcode-worker",
+        "until": time.time() + w.UNKNOWN_RESET_COOLDOWN_SECONDS,
+        "reset_known": False,
+        "blocked_reason": "quota",
+    }
     w.save_cache({"zcode-worker": unknown})
     observed = w.load_cache()["zcode-worker"]
     later = time.time() + 86400
@@ -267,7 +302,12 @@ def test_concurrent_new_block_survives_old_success(fake_env):
 
 
 def test_new_unknown_generation_survives_old_success(fake_env):
-    unknown = {"wrapper": "zcode-worker", "until": None, "reset_known": False}
+    unknown = {
+        "wrapper": "zcode-worker",
+        "until": time.time() + w.UNKNOWN_RESET_COOLDOWN_SECONDS,
+        "reset_known": False,
+        "blocked_reason": "quota",
+    }
     w.save_cache({"zcode-worker": unknown})
     old = w.load_cache()["zcode-worker"]
     w.save_cache({"zcode-worker": unknown})
@@ -382,12 +422,14 @@ def test_late_quota_replaces_timeout_circuit(fake_env):
 
 
 def test_timeout_does_not_override_unknown_quota(fake_env):
+    quota_until = time.time() + w.UNKNOWN_RESET_COOLDOWN_SECONDS
     w.save_cache(
         {
             "zcode-worker": {
                 "wrapper": "zcode-worker",
-                "until": None,
+                "until": quota_until,
                 "reset_known": False,
+                "blocked_reason": "quota",
             }
         }
     )
@@ -403,8 +445,9 @@ def test_timeout_does_not_override_unknown_quota(fake_env):
         }
     )
     entry = w.load_cache()["zcode-worker"]
-    assert entry["until"] is None and entry["reset_known"] is False
-    assert entry.get("blocked_reason") != "timeout"
+    assert entry["until"] == pytest.approx(quota_until)
+    assert entry["reset_known"] is False
+    assert entry.get("blocked_reason") == "quota"
     assert entry["generation"] != old["generation"]
     w.save_cache({}, clear={"zcode-worker": old})
     assert w.load_cache()["zcode-worker"] == entry
@@ -427,14 +470,16 @@ def test_unknown_quota_replaces_timeout_circuit(fake_env):
         {
             "zcode-worker": {
                 "wrapper": "zcode-worker",
-                "until": None,
+                "until": time.time() + w.UNKNOWN_RESET_COOLDOWN_SECONDS,
                 "reset_known": False,
+                "blocked_reason": "quota",
             }
         }
     )
     entry = w.load_cache()["zcode-worker"]
-    assert entry["until"] is None and entry["reset_known"] is False
-    assert entry.get("blocked_reason") != "timeout"
+    assert entry["reset_known"] is False
+    assert entry.get("blocked_reason") == "quota"
+    assert entry["until"] > timeout_until
     assert entry["generation"] != old["generation"]
     w.save_cache({}, clear={"zcode-worker": old})
     assert w.load_cache()["zcode-worker"] == entry
@@ -457,7 +502,7 @@ def test_timeout_circuit_expires_after_cooldown(fake_env, monkeypatch):
     assert w.load_cache() == {}
 
 
-def test_legacy_timeout_cache_migrates_and_unknown_quota_preserved(fake_env):
+def test_legacy_unknown_block_json_is_ignored_on_load(fake_env):
     cache_path = fake_env["state"] / "worker-ask" / "cache.json"
     w.ensure_state_dir()
     cache_path.write_text(
@@ -470,12 +515,11 @@ def test_legacy_timeout_cache_migrates_and_unknown_quota_preserved(fake_env):
                     "blocked_reason": "timeout",
                 },
                 "opencode-ask": {"wrapper": "opencode-ask", "until": None, "reset_known": False},
+                "claude-ask": {"wrapper": "claude-ask", "until": None, "reset_known": False, "blocked_reason": "quota"},
             }
         )
     )
-    cache = w.load_cache()
-    assert "zcode-worker" not in cache
-    entry = cache["opencode-ask"]
-    assert entry["until"] is None and entry["reset_known"] is False
-    assert entry["blocked_reason"] == "quota"
+    # Entrada legada com until None (qualquer blocked_reason) eh descartada:
+    # bloqueio permanente antigo destrava sozinho.
+    assert w.load_cache() == {}
     assert run_cli(fake_env, ["--mode", "plan", "task"], {"WORKER_ASK_NO_MUSE": "1"}).stdout == b"READY:zcode-worker"

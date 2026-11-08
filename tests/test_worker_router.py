@@ -280,8 +280,8 @@ def test_given_cache_ttl_expired_retry_status(fake_env):
     )
     assert r.returncode == 0
     data = json.loads(r.stdout)
-    # O provedor nao informou data: nao apresentar TTL estimado como reset.
-    assert data["cache"]["zcode-worker"]["ttl_remaining"] is None
+    # Sem data do provedor: cooldown finito (padrao 1 h), reset_known continua False.
+    assert 0 < data["cache"]["zcode-worker"]["ttl_remaining"] <= 3600
     assert data["cache"]["zcode-worker"]["reset_known"] is False
 
 

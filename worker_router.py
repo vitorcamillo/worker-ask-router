@@ -32,6 +32,8 @@ ORCHESTRATORS = ("codex", "claude", "zcode", "muse", "opencode")
 TIMEOUT_DIRECTIVE = "worker-ask: execucao interrompida por timeout; nao indica cota nem informa data de liberacao. Revise o estado da tarefa antes de uma nova tentativa."
 DEFAULT_MIN_TIMEOUT = 300.0
 TIMEOUT_COOLDOWN_SECONDS = 300.0
+# Cota excedida sem reset conhecido: cooldown finito em vez de bloqueio permanente.
+UNKNOWN_RESET_COOLDOWN_SECONDS = 3600.0
 DEFAULT_ZCODE_QUEUE_TIMEOUT = 600.0
 
 _CURRENT_PROC = None
@@ -243,6 +245,19 @@ def _min_timeout():
     return value
 
 
+def _unknown_reset_cooldown():
+    raw = os.environ.get("WORKER_ASK_UNKNOWN_RESET_COOLDOWN")
+    if raw is None:
+        return UNKNOWN_RESET_COOLDOWN_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return UNKNOWN_RESET_COOLDOWN_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return UNKNOWN_RESET_COOLDOWN_SECONDS
+    return value
+
+
 def _zcode_queue_timeout():
     raw = os.environ.get("WORKER_ASK_ZCODE_QUEUE_TIMEOUT")
     if raw is None:
@@ -412,14 +427,14 @@ def _cache_entry(key, value, now):
     if not isinstance(value, dict) or value.get("wrapper") != key:
         return None
     until = value.get("until")
-    if until is None and value.get("reset_known") is False:
-        if value.get("blocked_reason") == "timeout":
-            return None
-        entry = {"wrapper": key, "until": None, "reset_known": False, "blocked_reason": "quota"}
-    elif _valid_until(until, now) and until > now:
+    # Entrada legada com bloqueio permanente (until None) nao eh mais valida:
+    # destrava sozinha no proximo load.
+    if until is None:
+        return None
+    if _valid_until(until, now) and until > now:
         entry = {"wrapper": key, "until": float(until), "reset_known": value.get("reset_known") is True}
-        if value.get("blocked_reason") == "timeout":
-            entry["blocked_reason"] = "timeout"
+        if value.get("blocked_reason") in ("timeout", "quota"):
+            entry["blocked_reason"] = value["blocked_reason"]
     else:
         return None
     generation = value.get("generation")
@@ -533,7 +548,7 @@ def save_cache(updates, clear=()):
                 if previous and previous.get("blocked_reason") != "timeout" and entry.get("blocked_reason") == "timeout":
                     previous["generation"] = uuid.uuid4().hex
                     continue
-                if previous and previous.get("blocked_reason") != "timeout" and previous["until"] is not None and entry.get("blocked_reason") != "timeout" and (entry["until"] is None or previous["until"] > entry["until"]):
+                if previous and previous.get("blocked_reason") != "timeout" and entry.get("blocked_reason") != "timeout" and previous["until"] > entry["until"]:
                     previous["generation"] = uuid.uuid4().hex
                     continue
                 entry["generation"] = uuid.uuid4().hex
@@ -1001,7 +1016,7 @@ def _main_impl(argv=None):
         for k in CACHE_KEYS:
             v = cache.get(k)
             if v:
-                remaining = max(0, v["until"] - now) if v["until"] is not None else None
+                remaining = max(0, v["until"] - now)
                 snap[k] = {**v, "ttl_remaining": remaining}
         out = {"state_dir": str(_state_dir()), "cache": snap}
         status_text = json.dumps(out) + "\n"
@@ -1153,7 +1168,7 @@ def _main_impl(argv=None):
             _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
         if not args.retry_exhausted:
             entry = cache.get(name)
-            if entry and (entry.get("until") is None or time.time() < entry["until"]):
+            if entry and time.time() < entry["until"]:
                 _event("skip", f"{name}: skip (cooldown)", executor=name, reason="cooldown")
                 continue
         path = shutil.which(WRAPPER_BINARIES.get(name, name))
@@ -1242,7 +1257,12 @@ def _main_impl(argv=None):
             if reset is None and not admission_busy:
                 from quota_provider import query_reset
                 reset = query_reset(name, budget=max(0, deadline - time.monotonic()))
-            quota_entry = {"wrapper": name, "until": reset, "reset_known": reset is not None}
+            if reset is not None:
+                quota_entry = {"wrapper": name, "until": reset, "reset_known": True}
+            else:
+                # Sem reset conhecido: cooldown finito; destrava sozinho apos expirar.
+                quota_entry = {"wrapper": name, "until": time.time() + _unknown_reset_cooldown(),
+                               "reset_known": False, "blocked_reason": "quota"}
             if not admission_busy:
                 try:
                     save_cache({name: quota_entry})
