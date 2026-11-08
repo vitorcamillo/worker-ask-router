@@ -35,6 +35,9 @@ _LAUNCHER_INCOMPATIBLE_RE = re.compile(
     r"|business invalidation|native credential CAS|async bundle lifecycle)\n?"
 )
 _LAUNCHER_INCOMPATIBLE_MESSAGE = "launcher de autenticacao incompativel com o bundle do ZCode"
+# Start Plan ocupado por concorrência: o zcode-cli reintenta e, esgotado, sai
+# com rc 1 sem casar RATE_RE; é limite temporário, não falha do CLI.
+_START_BUSY_RE = re.compile(r"concurrency\s+limit|Start Plan is busy|model_rate_limited", re.I)
 QUOTA_RETRY_DEFAULT_SECONDS = 3600
 START_PLAN_RETRY_DELAYS = (15, 30)
 WORKER_SESSION_TTL_SECONDS = 6 * 3600
@@ -208,6 +211,8 @@ def _classify_process_failure(returncode: int, stderr: str) -> features.FeatureE
         return features.FeatureError(_LAUNCHER_INCOMPATIBLE_MESSAGE, "launcher_incompatible")
     if base.QUOTA_RE.search(stderr or ""):
         return features.FeatureError("cota do ZCode esgotada", "quota")
+    if _START_BUSY_RE.search(stderr or ""):
+        return features.FeatureError("limite temporário do ZCode", "rate_limit")
     if base.RATE_RE.search(stderr or ""):
         return features.FeatureError("limite temporário do ZCode", "rate_limit")
     if returncode in {-signal.SIGTERM, -signal.SIGKILL}:
@@ -251,6 +256,44 @@ def _session_cwd_matches(session_id: str, cwd: str, db_path=None) -> bool:
         return bool(row and isinstance(row[0], str) and os.path.realpath(row[0]) == os.path.realpath(cwd))
     except Exception:
         return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _start_attempt_had_effects(cwd: str, since_ms: int, db_path=None) -> bool:
+    """Detecta se a tentativa Start (desde `since_ms`) já alterou algo no cwd.
+
+    Conservador: qualquer erro de leitura devolve True, para não descartar a
+    fatia com efeitos em disco.
+    """
+
+    path = os.fspath(db_path or base.DB)
+    connection = None
+    try:
+        import sqlite3
+        from urllib.parse import quote
+
+        uri = f"file:{quote(os.path.abspath(path), safe='/')}?mode=ro"
+        connection = sqlite3.connect(uri, uri=True, timeout=2.0)
+        sessions = connection.execute(
+            "select id from session"
+            " where time_created >= ?"
+            " and (directory = ? or directory = ?)"
+            " and title like '[WORKER%'",
+            (since_ms, os.path.realpath(cwd), cwd),
+        ).fetchall()
+        if not sessions:
+            return True  # sessão sumiu (apagada na falha) ou não achada: sem prova, conservador
+        for (session_id,) in sessions:
+            tools = connection.execute(
+                "select read_only from tool_usage where session_id = ?", (session_id,)
+            ).fetchall()
+            if any(read_only is None or read_only == 0 for (read_only,) in tools):
+                return True
+        return False
+    except Exception:
+        return True
     finally:
         if connection is not None:
             connection.close()
@@ -856,6 +899,9 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                         args._provider = features.PROVIDER_ID
                         requested = features.requested_selection(args.model, args.effort, args._provider)
                         probe_fallback = "probe"
+            # Marco da tentativa Start: sessões criadas a partir daqui é que
+            # contam como efeitos desta fatia.
+            start_ms = int(time.time() * 1000)
             try:
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
                 returncode, stdout, stderr = raw
@@ -887,7 +933,10 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     elif _code == "rate_limit":
                         features.mark_start_plan_unavailable("rate_limit")
                     _fallback = _code
-                    if args.mode != "plan":
+                    if args.mode != "plan" and (
+                        _code != "rate_limit"
+                        or _start_attempt_had_effects(args.cwd, start_ms, db_path=db_path)
+                    ):
                         raise features.FeatureError(
                             "Start Plan esgotado durante a fatia; revise o diff e relance (a próxima chamada usa o plano)",
                             "start_plan_exhausted",

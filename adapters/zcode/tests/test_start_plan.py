@@ -381,6 +381,9 @@ def test_start_plan_rate_limit_deadline_goes_paid_without_sleep(tmp_path, monkey
 
 
 def test_write_start_plan_rate_limit_keeps_exhausted(tmp_path, monkeypatch):
+    # Sessão com efeitos (escrita já aconteceu): não pode cair para o plano
+    # pago e repetir a fatia.
+    monkeypatch.setattr(cli, "_start_attempt_had_effects", lambda *a, **k: True)
     result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="edit", timeout=600.0, start_failures=3)
     assert code == 1 and result["error"]["code"] == "start_plan_exhausted"
     assert calls["start"] == 1 and calls["paid"] == 0
@@ -388,6 +391,78 @@ def test_write_start_plan_rate_limit_keeps_exhausted(tmp_path, monkeypatch):
     marker = Path(base.STATE) / features.START_PLAN_MARKER
     assert marker.exists()
     assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
+
+
+def test_write_start_plan_rate_limit_without_effects_falls_back_paid(tmp_path, monkeypatch):
+    # Start Plan ocupado sem nenhum efeito em disco: segue o mesmo caminho do
+    # modo plan e roda a perna do plano pago.
+    monkeypatch.setattr(cli, "_start_attempt_had_effects", lambda *a, **k: False)
+    result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="edit", timeout=600.0, start_failures=3)
+    assert code == 0 and result["status"] == "ok"
+    assert result["startPlanFallback"] == "rate_limit"
+    assert result["effective"]["providerId"] == base.PROVIDER_ID
+    assert calls["start"] == 1 and calls["paid"] == 1
+    assert sleeps == []
+
+
+def test_classify_start_busy_is_rate_limit():
+    assert cli._classify_process_failure(1, "user concurrency limit exceeded").code == "rate_limit"
+    assert cli._classify_process_failure(
+        1,
+        "Start Plan is busy and automatic model stream recovery reached the maximum retry count.",
+    ).code == "rate_limit"
+    assert cli._classify_process_failure(1, "algo qualquer").code == "cli_failed"
+
+
+def make_start_busy_db(path: Path, *, directory, title="[WORKER] fatia", time_created=5_000, tools=(("Write", 0),)):
+    connection = sqlite3.connect(path)
+    connection.execute("create table session(id, directory, title, time_created)")
+    connection.execute(
+        "insert into session values (?, ?, ?, ?)", ("sess_w", directory, title, time_created)
+    )
+    connection.execute("create table tool_usage(session_id, tool_name, read_only)")
+    for tool_name, read_only in tools:
+        connection.execute(
+            "insert into tool_usage values (?, ?, ?)", ("sess_w", tool_name, read_only)
+        )
+    connection.commit()
+    connection.close()
+
+
+def test_start_attempt_had_effects_read_only_false(tmp_path):
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory=str(tmp_path), tools=(("Read", 1), ("Glob", 1)))
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is False
+
+
+def test_start_attempt_had_effects_write_true(tmp_path):
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory=str(tmp_path), tools=(("Read", 1), ("Write", 0)))
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
+
+
+def test_start_attempt_had_effects_null_read_only_true(tmp_path):
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory=str(tmp_path), tools=(("Edit", None),))
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
+
+
+def test_start_attempt_had_effects_other_cwd_or_older_session_false(tmp_path):
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory="/outra/pasta")
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
+    make_start_busy_db(tmp_path / "db2.sqlite", directory=str(tmp_path), time_created=500)
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=tmp_path / "db2.sqlite") is True
+
+
+def test_start_attempt_had_effects_missing_db_is_true(tmp_path):
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=tmp_path / "ausente.sqlite") is True
+
+
+def test_start_attempt_had_effects_ignores_non_worker_title(tmp_path):
+    db = tmp_path / "db.sqlite"
+    make_start_busy_db(db, directory=str(tmp_path), title="conversa comum")
+    assert cli._start_attempt_had_effects(str(tmp_path), 1_000, db_path=db) is True
 
 def test_execute_start_plan_rate_limit_retries_then_propagates(tmp_path, monkeypatch):
     provider = tmp_path / "provider.json"
