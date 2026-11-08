@@ -1,6 +1,9 @@
-"""Módulo comum às pontes ask-glm-bridge e ask-claude-bridge para falar o
-formato Anthropic Messages (``POST /v1/messages``), consumido pelo adaptador
-``anthropic`` do OpenCodex.
+"""Módulo para falar o formato Anthropic Messages (``POST /v1/messages``),
+consumido pelo adaptador ``anthropic`` do OpenCodex.
+
+Fonte de verdade: esta cópia em `pontes/ask-glm-bridge/`. A cópia da
+ask-claude-bridge (fora deste repo) é derivada e deve ser atualizada a
+partir daqui.
 
 Oferece: extração do "effort" do corpo, conversão Anthropic -> mensagens
 estilo Chat Completions, montagem de Message/erro/lista de modelos e o

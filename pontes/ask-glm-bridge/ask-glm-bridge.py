@@ -95,7 +95,8 @@ def acumular(provedor: str, in_tok: int, out_tok: int, custo: float = 0.0):
     caminho = os.path.join(STATE_DIR, f"uso-{provedor}-{time.strftime('%Y-%m-%d')}.json")
     with _lock:
         try:
-            d = json.load(open(caminho))
+            with open(caminho) as f:
+                d = json.load(f)
         except Exception:  # noqa: BLE001 — arquivo novo/corrompido recomeca do zero
             d = {"calls": 0, "in": 0, "out": 0, "custo": 0.0}
         d["calls"] += 1
@@ -395,6 +396,16 @@ class Progresso:
             self.aberto = False
 
 
+def validar_effort(effort):
+    """Effort do pedido (string em RACIOCINIO_FLASH) ou None; invalido -> 400.
+
+    Tem que rodar ANTES de _iniciar_stream: com "stream": true o 200 SSE ja foi
+    enviado e o erro viraria delta, nao o 400 que a docstring promete.
+    """
+    if effort is not None and (not isinstance(effort, str) or effort.lower() not in RACIOCINIO_FLASH):
+        raise ErroEntrada("effort inválido")
+
+
 def rodar_zcode(prompt: str, cwd: str, modo: str, modelo_publico: str,
                 effort=None, progresso=None):
     """Executa o zcode-worker com o prompt pelo stdin; retorna (json, sessionId).
@@ -407,8 +418,7 @@ def rodar_zcode(prompt: str, cwd: str, modo: str, modelo_publico: str,
     ferramentas. Timeout do subprocesso: TIMEOUT + 60 (folga sobre o --timeout
     do proprio worker).
     """
-    if effort is not None and (not isinstance(effort, str) or effort.lower() not in RACIOCINIO_FLASH):
-        raise ErroEntrada("effort inválido")
+    validar_effort(effort)
     nivel = RACIOCINIO_FLASH[effort.lower()] if effort else "high"
     cmd = [ZCODE_WORKER, "--cwd", cwd, "--mode", modo, "--model", modelo_publico,
            "--effort", nivel, "--json", "--queue-timeout", "30", "--timeout", str(TIMEOUT)]
@@ -605,8 +615,7 @@ class Handler(BaseHTTPRequestHandler):
         if "\0" in texto:
             raise ErroEntrada("prompt contém NUL")
         if tamanho_texto > MAX_PROMPT_BYTES:
-            raise ErroEntrada(
-                f"prompt excede {MAX_PROMPT_BYTES} bytes (limite de argumento do zcode-cli)")
+            raise ErroEntrada(f"prompt excede {MAX_PROMPT_BYTES} bytes")
 
         modo = resolver_modo(self.headers, messages)
         cwd = resolver_cwd(self.headers, messages, modo)
@@ -634,6 +643,7 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(r, dict) and isinstance(r.get("effort"), str):
                     e = r.get("effort")
             effort = e or None
+            validar_effort(effort)  # antes do stream: 400, nao delta de erro
 
             streaming = bool(corpo.get("stream"))
             if streaming:
@@ -694,6 +704,7 @@ class Handler(BaseHTTPRequestHandler):
             effort = anth.effort_de_corpo(corpo)
             modelo, texto, modo, cwd = self._preparar(
                 corpo.get("model", _SEM_MODEL), messages)
+            validar_effort(effort)  # antes do stream: 400, nao delta de erro
             streaming = bool(corpo.get("stream"))
             if streaming:
                 self._iniciar_stream(modelo, modo, cwd)
@@ -776,7 +787,7 @@ class Handler(BaseHTTPRequestHandler):
         """Abre o SSE: 200 + text/event-stream + no-cache + headers de diagnostico."""
         self._stream_id = novo_id()
         self._primeiro_delta = True
-        # escrita SSE nunca pode travar a thread alem de 30s (cliente preso)
+        # escrita SSE nunca pode travar a thread alem de 5s (cliente preso)
         self.connection.settimeout(5)
         try:
             self.send_response(200)

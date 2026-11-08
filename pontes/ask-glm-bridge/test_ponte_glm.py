@@ -9,6 +9,8 @@ import importlib.util
 import json
 import os
 import stat
+import subprocess
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -18,6 +20,7 @@ from pathlib import Path
 import pytest
 
 PONTE = Path(__file__).resolve().parent / "ask-glm-bridge.py"
+RAIZ = PONTE.parents[2]  # repo: bin/zcode-worker + adapters/zcode/src
 
 FAKE_WORKER = r"""#!/usr/bin/env python3
 import json, os, sys
@@ -196,3 +199,102 @@ def test_messages_sem_stream(ponte):
     assert textos == ["pong"]
     assert dados["usage"]["input_tokens"] == 1
     assert dados["usage"]["output_tokens"] == 1
+
+
+def test_messages_stream(ponte):
+    status, bruto = post(ponte["base"], "/v1/messages", {
+        "model": "glm-5.3-flash", "max_tokens": 100, "stream": True,
+        "messages": [{"role": "user", "content": "oi"}],
+    }, {"X-Ask-Cwd": str(ponte["cwd"])})
+    assert status == 200
+    texto = bruto.decode()
+    assert "message_start" in texto
+    assert "pong" in texto  # text_delta com a resposta final
+    assert "message_delta" in texto
+    assert "message_stop" in texto
+
+
+def test_prompt_acima_do_limite_da_400_sem_chamar_worker(ponte):
+    limite = ponte["mod"].MAX_PROMPT_BYTES
+    corpo = {"model": "glm-5.3-flash",
+             "messages": [{"role": "user", "content": "a" * (limite + 1)}]}
+    status, bruto = post(ponte["base"], "/v1/chat/completions", corpo,
+                         {"X-ZCode-Mode": "plan", "X-Ask-Cwd": str(ponte["cwd"])})
+    assert status == 400
+    assert "excede" in json.loads(bruto)["error"]["message"]
+    assert not ponte["out"].exists()  # worker nem chegou a rodar
+
+
+def test_effort_invalido_com_stream_da_400_antes_do_stream(ponte):
+    """effort invalido tem que virar 400 mesmo com stream: true (o 200 SSE so
+    sai depois de toda a validacao de entrada)."""
+    corpo, cab = chat_ok(ponte["cwd"], extra={"stream": True,
+                                              "reasoning_effort": 7})
+    status, bruto = post(ponte["base"], "/v1/chat/completions", corpo, cab)
+    assert status == 400
+    assert "effort" in json.loads(bruto)["error"]["message"]
+    assert not ponte["out"].exists()
+
+
+def test_resolver_modo_header_contexto_e_invalido(ponte):
+    mod = ponte["mod"]
+    user = [{"role": "user", "content": "oi"}]
+    assert mod.resolver_modo({"X-ZCode-Mode": "edit"}, user) == "edit"
+    assert mod.resolver_modo({}, user) == "plan"  # default do fixture
+    with pytest.raises(mod.ErroEntrada):
+        mod.resolver_modo({"X-ZCode-Mode": "yolo"}, user)
+    # ultimo "# Collaboration Mode: plan" no controle vence o header
+    plan_ctx = [{"role": "system", "content":
+                 "<collaboration_mode>\n# Collaboration Mode: plan\n"
+                 "</collaboration_mode>"}]
+    assert mod.resolver_modo({"X-ZCode-Mode": "edit"}, plan_ctx) == "plan"
+    # palavra que nao e plan nao ativa; vale o header
+    edit_ctx = [{"role": "system", "content":
+                 "<collaboration_mode>\n# Collaboration Mode: edit\n"
+                 "</collaboration_mode>"}]
+    assert mod.resolver_modo({"X-ZCode-Mode": "edit"}, edit_ctx) == "edit"
+
+
+def test_resolver_modo_lembrete_plan_do_app_zcode(ponte):
+    mod = ponte["mod"]
+    msgs = [{"role": "user", "content":
+             "<system-reminder>\nPlan mode is active. Nao edite arquivos."
+             "</system-reminder>"}]
+    assert mod.resolver_modo({"X-ZCode-Mode": "edit"}, msgs) == "plan"
+
+
+def test_resolver_cwd_header_contexto_e_erros(ponte, tmp_path):
+    mod = ponte["mod"]
+    alvo = tmp_path / "alvo"
+    alvo.mkdir()
+    assert mod.resolver_cwd({"X-Ask-Cwd": str(alvo)}, [], "edit") == \
+        os.path.realpath(alvo)
+    with pytest.raises(mod.ErroEntrada):  # header invalido: 400 sem fallback
+        mod.resolver_cwd({"X-Ask-Cwd": "/caminho/que/nao/existe"}, [], "plan")
+    ctx = [{"role": "system", "content":
+            f"<environment_context>\n<cwd>{alvo}</cwd>\n</environment_context>"}]
+    assert mod.resolver_cwd({}, ctx, "edit") == os.path.realpath(alvo)
+    ctx_ruim = [{"role": "system", "content":
+                 "<environment_context>\n<cwd>/caminho/que/nao/existe</cwd>\n"
+                 "</environment_context>"}]
+    with pytest.raises(mod.ErroEntrada):  # contexto invalido: 400 sem fallback
+        mod.resolver_cwd({}, ctx_ruim, "plan")
+    assert mod.resolver_cwd({}, [], "plan") == os.path.expanduser("~")
+    with pytest.raises(mod.ErroEntrada):  # edit exige cwd explicito
+        mod.resolver_cwd({}, [], "edit")
+
+
+def test_contrato_worker_real_aceita_as_flags_da_ponte():
+    """Contrato com o worker real (nao o fake): a ponte passa --json (sempre) e
+    --chat (modo plan); o --help do bin/zcode-worker, resolvendo o adapter do
+    repo como na chamada real, precisa declarar as duas flags."""
+    worker = RAIZ / "bin" / "zcode-worker"
+    if not worker.exists():
+        pytest.fail(f"worker real ausente: {worker}")
+    env = dict(os.environ)
+    env["ASK_PRESENTATION_ACTIVE"] = "1"  # a ponte sempre ativa este env
+    r = subprocess.run([sys.executable, str(worker), "--help"],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr[-400:]
+    assert "--json" in r.stdout
+    assert "--chat" in r.stdout
