@@ -38,8 +38,11 @@ PROFILES = {
 TASK_MAX_BYTES = base.TASK_MAX_BYTES
 START_PLAN_PROVIDER_ID = "account:zai-start-plan"
 START_PLAN_MODELS = frozenset({"glm-5.3-flash"})
-START_PLAN_HOURS = (0, 24)  # Start Plan vale o dia todo até expirar; janela via ZCODE_WORKER_START_PLAN_HOURS
 START_PLAN_BUSY_MINUTES = 2
+# Sem regra de horário: disponibilidade é detectada na tentativa; quando não
+# há horário de volta confiável, recheca em pouco tempo.
+START_PLAN_RECHECK_MINUTES = 30
+START_PLAN_MAX_BLOCK_DAYS = 7
 START_PLAN_MARKER = "start-plan-unavailable"
 START_PLAN_OK_MARKER = "start-plan-ok"
 MAX_ATTACHMENTS = 5
@@ -255,27 +258,6 @@ def _start_plan_state_path(state_dir: str | os.PathLike[str] | None = None) -> P
     return Path(state_dir or base.STATE) / START_PLAN_MARKER
 
 
-def start_plan_hours(environ=None) -> tuple[int, int]:
-    env = os.environ if environ is None else environ
-    raw = env.get("ZCODE_WORKER_START_PLAN_HOURS")
-    if not isinstance(raw, str):
-        return START_PLAN_HOURS
-    text = raw.strip().lower().replace(" ", "")
-    if text == "always":
-        return (0, 24)
-    parts = text.split("-")
-    if len(parts) != 2:
-        return START_PLAN_HOURS
-    try:
-        start = int(parts[0])
-        end = int(parts[1])
-    except ValueError:
-        return START_PLAN_HOURS
-    if not 0 <= start < end <= 24:
-        return START_PLAN_HOURS
-    return (start, end)
-
-
 def _read_start_plan_blocked_until(state_dir=None) -> datetime.datetime | None:
     try:
         text = _start_plan_state_path(state_dir).read_text(encoding="utf-8")
@@ -301,17 +283,24 @@ def start_plan_blocked(*, now=None, state_dir=None) -> bool:
     return current < until
 
 
-def mark_start_plan_unavailable(reason: str, *, now=None, state_dir=None) -> None:
+def mark_start_plan_unavailable(
+    reason: str, *, now=None, state_dir=None, until=None
+) -> None:
     try:
         current = now or datetime.datetime.now()
         if reason in {"rate_limit", "refused"}:
-            until = current + datetime.timedelta(minutes=START_PLAN_BUSY_MINUTES)
+            until_dt = current + datetime.timedelta(minutes=START_PLAN_BUSY_MINUTES)
+        elif (
+            isinstance(until, datetime.datetime)
+            and until.tzinfo is None
+            and current < until <= current + datetime.timedelta(days=START_PLAN_MAX_BLOCK_DAYS)
+        ):
+            until_dt = until
         else:
-            base_day = current.replace(hour=0, minute=0, second=0, microsecond=0)
-            until = base_day + datetime.timedelta(days=1)
+            until_dt = current + datetime.timedelta(minutes=START_PLAN_RECHECK_MINUTES)
         directory = Path(state_dir or base.STATE)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        content = f"{until.isoformat(timespec='seconds')} {reason}\n"
+        content = f"{until_dt.isoformat(timespec='seconds')} {reason}\n"
         fd, tmp_name = tempfile.mkstemp(prefix="start-plan-", suffix=".tmp", dir=str(directory))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as target:
@@ -368,15 +357,11 @@ def provider_for(model: str, *, now=None, state_dir=None, environ=None) -> str:
         return PROVIDER_ID
     if canonical not in START_PLAN_MODELS:
         return PROVIDER_ID
-    current = now or datetime.datetime.now()
-    start, end = start_plan_hours(environ)
-    if not start <= current.hour < end:
-        return PROVIDER_ID
     env = os.environ if environ is None else environ
     raw = env.get("ZCODE_WORKER_START_PLAN")
     if isinstance(raw, str) and raw.strip().lower() in {"0", "off", "false", "no"}:
         return PROVIDER_ID
-    if start_plan_blocked(now=current, state_dir=state_dir):
+    if start_plan_blocked(now=now or datetime.datetime.now(), state_dir=state_dir):
         return PROVIDER_ID
     return START_PLAN_PROVIDER_ID
 
@@ -393,17 +378,10 @@ def start_plan_next_available(model: str, *, now=None, state_dir=None, environ=N
     if isinstance(raw, str) and raw.strip().lower() in {"0", "off", "false", "no"}:
         return None
     current = now or datetime.datetime.now()
-    moment = current
     until = _read_start_plan_blocked_until(state_dir)
-    if until is not None and until > moment:
-        moment = until
-    start, end = start_plan_hours(environ)
-    if start <= moment.hour < end:
-        return moment
-    if moment.hour < start:
-        return moment.replace(hour=start, minute=0, second=0, microsecond=0)
-    following = moment + datetime.timedelta(days=1)
-    return following.replace(hour=start, minute=0, second=0, microsecond=0)
+    if until is not None and until > current:
+        return until
+    return current
 
 
 def model_display(model: str) -> str:

@@ -147,7 +147,7 @@ def _config_node(config):
     selection = node.get("defaultModelSelection") if isinstance(node, dict) else None
     # O provider de origem é só o template da conta Z.ai: a seleção efetiva é
     # do PROVIDER_ID deste worker (plano pago); features troca para o Start Plan
-    # quando couber (horário e patch opcional do launch.cjs).
+    # quando disponível, sem janela de horário (e patch opcional do launch.cjs).
     provider = selection.get("providerId") if isinstance(selection, dict) else None
     if not isinstance(provider, str) or not provider.startswith(("account:zai-", "account:bigmodel-")):
         raise WorkerError("provider configurado fora da conta Z.ai esperada")

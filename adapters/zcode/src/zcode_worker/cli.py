@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import datetime
 import json
+import math
 import os
 import re
 import selectors
@@ -203,6 +205,17 @@ def _chunk_sink(event_sink):
     return on_chunk
 
 
+def _probe_error_until(error: features.FeatureError) -> datetime.datetime | None:
+    """Converte ``reset_at`` (epoch) do erro de cota em datetime naive local."""
+    reset_at = getattr(error, "reset_at", None)
+    if reset_at is None:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(reset_at)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _fail_attempt(args, stdout, returncode, stderr, *, db_path=None) -> features.FeatureError:
     """Classifica a tentativa falha e apaga a sessão extraída do stdout.
 
@@ -223,6 +236,41 @@ def _fail_attempt(args, stdout, returncode, stderr, *, db_path=None) -> features
     return failure
 
 
+def _quota_reset_from_stderr(stderr: str) -> float | None:
+    """Pergunta ao helper externo o horário de volta da cota (epoch em segundos).
+
+    O helper recebe o stderr bruto no stdin e devolve uma linha
+    ``worker-ask-quota-reset: <epoch>``; qualquer saída fora do contrato,
+    falha de execução ou valor inválido vira ``None`` (rechecar em pouco tempo).
+    O stderr nunca é logado nem devolvido.
+    """
+    helper = os.environ.get("WORKER_ASK_QUOTA_HELPER")
+    if not helper:
+        return None
+    try:
+        completed = subprocess.run(
+            [sys.executable, helper],
+            input=(stderr or "")[:65536],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if completed.returncode != 0 or len(completed.stdout) >= 128:
+        return None
+    match = re.search(r"worker-ask-quota-reset:\s*([^\s]+)", completed.stdout)
+    if not match:
+        return None
+    try:
+        reset_at = float(match.group(1))
+    except ValueError:
+        return None
+    if not math.isfinite(reset_at) or reset_at <= time.time():
+        return None
+    return reset_at
+
+
 def _classify_process_failure(returncode: int, stderr: str) -> features.FeatureError:
     # O conteúdo só é usado para classificação local; nunca é devolvido ao operador.
     if returncode == 124:
@@ -234,7 +282,9 @@ def _classify_process_failure(returncode: int, stderr: str) -> features.FeatureE
     if returncode == 1 and _LAUNCHER_INCOMPATIBLE_RE.fullmatch(stderr or ""):
         return features.FeatureError(_LAUNCHER_INCOMPATIBLE_MESSAGE, "launcher_incompatible")
     if base.QUOTA_RE.search(stderr or ""):
-        return features.FeatureError("cota do ZCode esgotada", "quota")
+        error = features.FeatureError("cota do ZCode esgotada", "quota")
+        error.reset_at = _quota_reset_from_stderr(stderr)
+        return error
     if _START_BUSY_RE.search(stderr or ""):
         return features.FeatureError("limite temporário do ZCode", "rate_limit")
     if base.RATE_RE.search(stderr or ""):
@@ -980,7 +1030,7 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     if _probe_code == "rate_limit":
                         features.mark_start_plan_unavailable("refused")
                     elif _probe_code == "quota":
-                        features.mark_start_plan_unavailable("quota")
+                        features.mark_start_plan_unavailable("quota", until=_probe_error_until(_probe_error))
                     elif _probe_code == "start_plan_drift":
                         features.mark_start_plan_unavailable("drift")
                     else:
@@ -1025,7 +1075,7 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     _fallback = "drift"
                 else:
                     if _code == "quota":
-                        features.mark_start_plan_unavailable("quota")
+                        features.mark_start_plan_unavailable("quota", until=_probe_error_until(_error))
                     elif _code == "rate_limit":
                         features.mark_start_plan_unavailable("rate_limit")
                     _fallback = _code

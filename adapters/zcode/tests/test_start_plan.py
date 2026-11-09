@@ -1,4 +1,4 @@
-"""Start Plan: janela, bloqueio com validade, confirmacao e sonda pre-edit."""
+"""Start Plan: bloqueio com validade, confirmacao e sonda pre-edit."""
 from __future__ import annotations
 import contextlib
 import datetime
@@ -51,45 +51,11 @@ def make_resume_db(path: Path, *, session="sess_resume", cwd=".", provider=None,
 def noon(day=15):
     return datetime.datetime(2026, 10, day, 12, 0)
 
-def test_start_plan_hours_defaults_and_shapes():
-    assert features.start_plan_hours({}) == (0, 24)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": "9-18"}) == (9, 18)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": " 12 - 22 "}) == (12, 22)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": "0-24"}) == (0, 24)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": "always"}) == (0, 24)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": " ALWAYS "}) == (0, 24)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": "Always"}) == (0, 24)
-
-def test_start_plan_hours_invalid_falls_back():
-    for raw in ("22-12", "x", "0-25", "12", "12-22-1", "a-b", "", "12-", "-5", "5-5", "24-24"):
-        assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": raw}) == (0, 24)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": 12}) == (0, 24)
-    assert features.start_plan_hours({"ZCODE_WORKER_START_PLAN_HOURS": None}) == (0, 24)
-
-def test_window_boundaries(tmp_path):
-    s = tmp_path / "state"
-    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 11, 59), state_dir=s, environ=window) == base.PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 12, 0), state_dir=s, environ=window) == features.START_PLAN_PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 21, 59), state_dir=s, environ=window) == features.START_PLAN_PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 22, 0), state_dir=s, environ=window) == base.PROVIDER_ID
-
-def test_provider_for_respects_hours_env(tmp_path):
-    s = tmp_path / "state"
-    env = {"ZCODE_WORKER_START_PLAN_HOURS": "9-18"}
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 8, 0), state_dir=s, environ=env) == base.PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 12, 0), state_dir=s, environ=env) == features.START_PLAN_PROVIDER_ID
-    always = {"ZCODE_WORKER_START_PLAN_HOURS": "always"}
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ=always) == features.START_PLAN_PROVIDER_ID
-    # Inválido cai no padrão (0, 24): vale o dia todo, inclusive fora de qualquer janela restrita.
-    invalid = {"ZCODE_WORKER_START_PLAN_HOURS": "x"}
-    assert features.provider_for("glm-5.3-flash", now=noon(), state_dir=s, environ=invalid) == features.START_PLAN_PROVIDER_ID
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ=invalid) == features.START_PLAN_PROVIDER_ID
-
-
-def test_provider_for_default_window_covers_all_day(tmp_path):
+def test_provider_for_any_hour_without_marker(tmp_path):
+    # Sem regra de horário: Start Plan vale a qualquer hora enquanto não houver marcador.
     s = tmp_path / "state"
     assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 3, 0), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 23, 30), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
 
 def test_glm53_never_start(tmp_path):
     s = tmp_path / "state"
@@ -125,17 +91,48 @@ def test_block_refused_last_2_minutes(tmp_path):
     assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is True
     assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 22), state_dir=s) is False
 
-def test_block_quota_until_midnight(tmp_path):
+def test_block_quota_without_until_rechecks_30_minutes(tmp_path):
     s = tmp_path / "state"
     now = datetime.datetime(2026, 10, 15, 13, 20)
     features.mark_start_plan_unavailable("quota", now=now, state_dir=s)
-    assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-16T00:00:00 quota\n"
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 23, 59), state_dir=s) is True
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 16, 0, 0), state_dir=s) is False
+    assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-15T13:50:00 quota\n"
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 49), state_dir=s) is True
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 50), state_dir=s) is False
+
+
+def test_block_quota_uses_valid_until(tmp_path):
+    s = tmp_path / "state"
+    now = datetime.datetime(2026, 10, 15, 13, 20)
+    until = datetime.datetime(2026, 10, 15, 15, 0)
+    features.mark_start_plan_unavailable("quota", now=now, state_dir=s, until=until)
+    assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-15T15:00:00 quota\n"
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 14, 59), state_dir=s) is True
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 15, 0), state_dir=s) is False
+
+
+def test_block_quota_ignores_invalid_until(tmp_path):
+    s = tmp_path / "state"
+    now = datetime.datetime(2026, 10, 15, 13, 20)
+    for until in (
+        datetime.datetime(2026, 10, 15, 13, 0),  # passado
+        datetime.datetime(2026, 10, 15, 13, 20),  # igual a now
+        datetime.datetime(2026, 10, 23, 13, 21),  # mais de 7 dias
+        datetime.datetime(2026, 10, 15, 15, 0, tzinfo=datetime.timezone.utc),  # aware
+        "2026-10-15T15:00:00",  # tipo errado
+        1760000000.0,  # tipo errado
+    ):
+        features.mark_start_plan_unavailable("quota", now=now, state_dir=s, until=until)
+        assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-15T13:50:00 quota\n"
+
+
+def test_block_drift_and_mismatch_recheck_30_minutes(tmp_path):
+    s = tmp_path / "state"
+    now = datetime.datetime(2026, 10, 15, 13, 20)
     for reason in ("drift", "mismatch"):
         features.mark_start_plan_unavailable(reason, now=now, state_dir=s)
-        assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 23, 0), state_dir=s) is True
-        assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 16, 0, 0), state_dir=s) is False
+        assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == f"2026-10-15T13:50:00 {reason}\n"
+        assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 49), state_dir=s) is True
+        assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 50), state_dir=s) is False
 
 def test_blocked_malformed_not_blocked(tmp_path, monkeypatch):
     s = tmp_path / "state"
@@ -165,7 +162,7 @@ def test_mark_writes_mode_and_swallows_errors(tmp_path, monkeypatch):
     now = noon()
     features.mark_start_plan_unavailable("drift", now=now, state_dir=s)
     marker = s / features.START_PLAN_MARKER
-    assert marker.read_text(encoding="utf-8") == "2026-10-16T00:00:00 drift\n"
+    assert marker.read_text(encoding="utf-8") == "2026-10-15T12:30:00 drift\n"
     assert stat.S_IMODE(marker.stat().st_mode) == 0o600
     assert stat.S_IMODE(s.stat().st_mode) == 0o700
     monkeypatch.setattr("tempfile.mkstemp", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
@@ -769,13 +766,13 @@ def test_resume_paid_session_accepts_start_plan_request(tmp_path):
     # verify_effective.
     cli._verify_resume(args, db_path=db)
 
-def test_resume_start_plan_after_block_or_window_rejects_before_run(tmp_path, monkeypatch):
+def test_resume_start_plan_after_block_rejects_before_run(tmp_path, monkeypatch):
     db = tmp_path / "resume.sqlite"
     make_resume_db(db, session="sess_resume", cwd=str(tmp_path), provider=features.START_PLAN_PROVIDER_ID)
     state = tmp_path / "state"
     monkeypatch.setattr(cli.base, "STATE", str(state))
     # Marcador de bloqueio ativo (rate_limit/quota) faz provider_for resolver
-    # para o pago em qualquer horário; fora da janela a resolução é a mesma.
+    # para o pago em qualquer horário.
     state.mkdir(parents=True)
     (state / features.START_PLAN_MARKER).write_text("2099-01-01T00:00:00 rate_limit\n", encoding="utf-8")
     assert features.provider_for("glm-5.3-flash") == base.PROVIDER_ID
@@ -820,41 +817,23 @@ def test_next_available_unknown_or_disabled_model(tmp_path):
     ) == noon()
 
 
-def test_next_available_inside_window_without_marker(tmp_path):
+def test_next_available_without_marker_returns_now(tmp_path):
     s = tmp_path / "state"
     now = noon()
     assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ={}) == now
+    # Sem regra de horário: qualquer hora do dia devolve o próprio now.
+    late = datetime.datetime(2026, 10, 15, 23, 30)
+    assert features.start_plan_next_available("glm-5.3-flash", now=late, state_dir=s, environ={}) == late
 
 
-def test_next_available_before_window_returns_same_day_open(tmp_path):
-    s = tmp_path / "state"
-    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
-    now = datetime.datetime(2026, 10, 15, 10, 0)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=window) == datetime.datetime(2026, 10, 15, 12, 0)
-
-
-def test_next_available_after_window_returns_next_day_open(tmp_path):
-    s = tmp_path / "state"
-    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
-    now = datetime.datetime(2026, 10, 15, 22, 30)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=window) == datetime.datetime(2026, 10, 16, 12, 0)
-
-
-def test_next_available_busy_marker_inside_window(tmp_path):
+def test_next_available_future_marker_returns_until(tmp_path):
     s = tmp_path / "state"
     s.mkdir(parents=True)
     (s / features.START_PLAN_MARKER).write_text("2026-10-15T21:50:00 rate_limit\n", encoding="utf-8")
     now = datetime.datetime(2026, 10, 15, 21, 40)
     assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ={}) == datetime.datetime(2026, 10, 15, 21, 50)
-
-
-def test_next_available_midnight_marker_after_hours(tmp_path):
-    s = tmp_path / "state"
-    window = {"ZCODE_WORKER_START_PLAN_HOURS": "12-22"}
-    s.mkdir(parents=True)
-    (s / features.START_PLAN_MARKER).write_text("2026-10-16T00:00:00 quota\n", encoding="utf-8")
-    now = datetime.datetime(2026, 10, 15, 15, 0)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=window) == datetime.datetime(2026, 10, 16, 12, 0)
+    (s / features.START_PLAN_MARKER).write_text("2026-10-20T15:00:00 quota\n", encoding="utf-8")
+    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ={}) == datetime.datetime(2026, 10, 20, 15, 0)
 
 
 def test_next_available_expired_marker_behaves_as_no_marker(tmp_path):
@@ -866,20 +845,9 @@ def test_next_available_expired_marker_behaves_as_no_marker(tmp_path):
     assert features.start_plan_blocked(now=now, state_dir=s) is False
 
 
-def test_next_available_always_hours_returns_moment_or_until(tmp_path):
-    s = tmp_path / "state"
-    always = {"ZCODE_WORKER_START_PLAN_HOURS": "always"}
-    now = datetime.datetime(2026, 10, 15, 3, 0)
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=always) == now
-    s.mkdir(parents=True)
-    (s / features.START_PLAN_MARKER).write_text("2026-10-15T04:00:00 quota\n", encoding="utf-8")
-    assert features.start_plan_next_available("glm-5.3-flash", now=now, state_dir=s, environ=always) == datetime.datetime(2026, 10, 15, 4, 0)
-
-
 def test_next_available_uses_current_time_and_real_environ(tmp_path, monkeypatch):
     s = tmp_path / "state"
     monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)
-    monkeypatch.delenv("ZCODE_WORKER_START_PLAN_HOURS", raising=False)
     outcome = features.start_plan_next_available("glm-5.3-flash", state_dir=s)
     assert isinstance(outcome, datetime.datetime)
 
@@ -992,3 +960,58 @@ def test_main_quota_without_retry_after_writes_nothing(monkeypatch, tmp_path, ca
     monkeypatch.setattr(cli, "run_task", lambda *a, **k: ({"status": "error", "exitCode": 75, "error": {"code": "quota", "message": "cota"}}, 75))
     assert cli.main(["--json", "--cwd", str(tmp_path), "tarefa"]) == 75
     assert "worker-ask-quota-reset" not in capsys.readouterr().err
+
+
+def _write_quota_helper(path: Path, *, body: str) -> None:
+    path.write_text(body, encoding="utf-8")
+
+
+def test_quota_reset_from_stderr_with_fake_helper(tmp_path, monkeypatch):
+    helper = tmp_path / "helper.py"
+    _write_quota_helper(helper, body="import sys, time\nsys.stdin.read()\nprint('worker-ask-quota-reset: %d' % (time.time() + 600))\n")
+    monkeypatch.setenv("WORKER_ASK_QUOTA_HELPER", str(helper))
+    reset_at = cli._quota_reset_from_stderr("quota exceeded")
+    assert isinstance(reset_at, float)
+    assert reset_at > time.time()
+
+
+def test_quota_reset_from_stderr_without_env(tmp_path, monkeypatch):
+    monkeypatch.delenv("WORKER_ASK_QUOTA_HELPER", raising=False)
+    assert cli._quota_reset_from_stderr("quota exceeded") is None
+
+
+def test_quota_reset_from_stderr_helper_rc1(tmp_path, monkeypatch):
+    helper = tmp_path / "helper.py"
+    _write_quota_helper(helper, body="import sys\nsys.exit(1)\n")
+    monkeypatch.setenv("WORKER_ASK_QUOTA_HELPER", str(helper))
+    assert cli._quota_reset_from_stderr("quota exceeded") is None
+
+
+def test_quota_reset_from_stderr_missing_helper(tmp_path, monkeypatch):
+    monkeypatch.setenv("WORKER_ASK_QUOTA_HELPER", str(tmp_path / "ausente.py"))
+    assert cli._quota_reset_from_stderr("quota exceeded") is None
+
+
+def test_quota_reset_from_stderr_ignores_garbage_output(tmp_path, monkeypatch):
+    helper = tmp_path / "helper.py"
+    _write_quota_helper(helper, body="print('x' * 200)\n")
+    monkeypatch.setenv("WORKER_ASK_QUOTA_HELPER", str(helper))
+    assert cli._quota_reset_from_stderr("quota exceeded") is None
+    _write_quota_helper(helper, body="print('worker-ask-quota-reset: nan')\n")
+    assert cli._quota_reset_from_stderr("quota exceeded") is None
+    _write_quota_helper(helper, body="import time\nprint('worker-ask-quota-reset: %d' % (time.time() - 600))\n")
+    assert cli._quota_reset_from_stderr("quota exceeded") is None
+
+
+def test_classify_quota_fills_reset_at(tmp_path, monkeypatch):
+    helper = tmp_path / "helper.py"
+    _write_quota_helper(helper, body="import sys, time\nprint('worker-ask-quota-reset: %d' % (time.time() + 600))\n")
+    monkeypatch.setenv("WORKER_ASK_QUOTA_HELPER", str(helper))
+    error = cli._classify_process_failure(1, "[1310] usage limit reached")
+    assert error.code == "quota"
+    assert isinstance(error.reset_at, float)
+    assert error.reset_at > time.time()
+    monkeypatch.delenv("WORKER_ASK_QUOTA_HELPER", raising=False)
+    error = cli._classify_process_failure(1, "quota exceeded")
+    assert error.code == "quota"
+    assert error.reset_at is None
