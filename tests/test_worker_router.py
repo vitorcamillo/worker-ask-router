@@ -310,6 +310,20 @@ def test_given_symlink_broken_cache_rejected(fake_env):
         wr.load_cache(create_dir=False)
 
 
+def test_given_symlink_broken_cache_race_nofollow_rejected(fake_env, monkeypatch):
+    # Corrida: cache.json vira symlink entre is_symlink() e a abertura.
+    # Com O_NOFOLLOW, os.open falha (ELOOP) -> RuntimeError; sem a trava,
+    # o symlink seria lido e devolveria o cache (o teste falharia).
+    d = fake_env["state"] / "worker-ask"
+    d.mkdir(parents=True, exist_ok=True)
+    alvo = d / "alvo.json"
+    alvo.write_text(json.dumps({"zcode-worker": {"wrapper": "zcode-worker", "until": time.time() + 600}}))
+    (d / "cache.json").symlink_to(alvo)
+    monkeypatch.setattr(wr.Path, "is_symlink", lambda self: False)
+    with pytest.raises(RuntimeError):
+        wr.load_cache(create_dir=False)
+
+
 def test_given_ancestors_symlink_snapshot_rejected(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
@@ -765,7 +779,7 @@ def test_malformed_cache_is_sanitized(fake_env, content):
     assert set(wr.load_cache()) == {"opencode-ask"}
 
 
-@pytest.mark.parametrize("value", [None, True, "later", float("inf"), -1, 10**20])
+@pytest.mark.parametrize("value", [None, True, "later", float("inf"), float("nan"), -1, 10**20])
 def test_cache_timestamp_is_finite_and_bounded(value):
     assert wr._valid_until(value, time.time()) is False
 

@@ -103,15 +103,9 @@
           "."
         ],
         [
-          "gitleaks",
-          "dir",
-          ".",
-          "--no-banner",
-          "--redact",
-          "--report-format",
-          "json",
-          "--report-path",
-          "out/secrets.json"
+          "python3",
+          "-c",
+          "import os,subprocess,sys;os.makedirs('out',exist_ok=True);sys.exit(subprocess.call(['gitleaks','dir','.','--no-banner','--redact','--report-format','json','--report-path','out/secrets.json']))"
         ],
         [
           "python3",
@@ -189,8 +183,7 @@
           "-m",
           "pytest",
           "-q",
-          "tests/test_worker_router.py",
-          "tests/test_install.py"
+          "tests/"
         ],
         [
           "env",
