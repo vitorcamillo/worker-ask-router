@@ -173,13 +173,15 @@ def run_mutation() -> int:
 
 
 def fixture_bundle() -> str:
+    # Nomes portados para o bundle de 02/11/2026; referência: fixture já atualizada
+    # em tests/auth-session.test.cjs (linhas ~412–426 e ~495–506).
     return "\n".join([
-        "const e={locationStore:null,httpClient:null,env:{},credentialStore:null}; const h='synthetic-oauth'; const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}}; const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}}); const nativeStore={async deleteIfValue(i,a){let c=j4(i),u=GJ(a)}};",
-        "function Qft(){return n.resolve(h,()=>o(`${xdo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
-        "function Wuc(e){return Qft({httpClient:e.httpClient??xui(e.env)})}",
-        "async function Ooi(e){const t={},n='zai',R={accessToken:'synthetic-oauth'},u=undefined,b={};return Wuc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u,credentialStore:b})} async function oauthReady(){const b={};const n='zai';const t={};const e={httpClient:null};const u=undefined;const R=await Promise.resolve({}),N=await Nae(Wuc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);return N;}",
-        "async function retry(){const b={business:{token:'synthetic-business'}}; if(n.wasRejected&&n.wasRejected(b.business)){n.invalidate(b.business)}}",
-        "function bQe(){};bQe();mSc();async function mSc(){if(process.argv.includes('-p'))process.stdout.write('fixture-prompt\\n');else process.stdout.write('fixture-version\\n');}",
+        "const e={locationStore:null,httpClient:null,env:{},credentialStore:null};const h='synthetic-oauth';const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}};const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}});const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a)}};",
+        "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
+        "function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
+        "function obc(e){return Promise.resolve({token:'synthetic-business'})}const Nae=async(value)=>value;async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;}",
+        "async function retry(){const v={business:{token:'synthetic-business'}};if(n.wasRejected&&n.wasRejected(v.business)){n.invalidate(v.business)}}",
+        "function ttt(){};ttt();NPc();async function NPc(){if(process.argv.includes('-p'))process.stdout.write('fixture-prompt\\n');else process.stdout.write('fixture-version\\n');}",
     ])
 
 
