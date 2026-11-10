@@ -113,6 +113,15 @@ if behavior == "fail_stdout_quota":
 if behavior == "fail_stdout_limit_banner":
     print("You've hit your weekly limit \\u00b7 resets Oct 30, 1am (America/Sao_Paulo)")
     sys.exit(1)
+if behavior == "fail_stdout_limit_banner_warn":
+    print("You've hit your weekly limit \\u00b7 resets Oct 30, 1am (America/Sao_Paulo)")
+    print("Warning: this sign-in ends between 2026-11-16 and 2026-11-19.", file=sys.stderr)
+    sys.exit(1)
+if behavior == "fail_stdout_banner_real_error":
+    print("You've hit your weekly limit \\u00b7 resets Oct 30, 1am (America/Sao_Paulo)")
+    print("Warning: aviso qualquer", file=sys.stderr)
+    print("erro generico do stub " + name, file=sys.stderr)
+    sys.exit(1)
 if behavior == "fail_model":
     print("ERROR: The 'gpt-x' model is not supported when using Codex with a ChatGPT account.", file=sys.stderr)
     sys.exit(1)
@@ -709,6 +718,19 @@ class ClaudeAskContratoTest(WrapperTestBase):
             behaviors={"STUB_BEHAVIOR_CLAUDE": "fail_stdout_limit_banner"})
         self.assertEqual(proc.returncode, 75, proc.stderr)
         self.assertNotIn("You've hit", proc.stderr)
+
+    def test_limite_no_stdout_com_warning_no_stderr_vira_cota_75(self):
+        # O CLI real imprime "Warning: this sign-in ends ..." no stderr junto do banner.
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", self.cwd, "tarefa"],
+            behaviors={"STUB_BEHAVIOR_CLAUDE": "fail_stdout_limit_banner_warn"})
+        self.assertEqual(proc.returncode, 75, proc.stderr)
+        self.assertNotIn("You've hit", proc.stderr)
+        # Outra linha de stderr (erro real) mantém o banner como dado: rc1.
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", self.cwd, "tarefa"],
+            behaviors={"STUB_BEHAVIOR_CLAUDE": "fail_stdout_banner_real_error"})
+        self.assertEqual(proc.returncode, 1, proc.stderr)
 
     def test_stderr_bruto_fica_no_diag_privado(self):
         proc = self.run_wrapper(

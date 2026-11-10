@@ -85,8 +85,9 @@ if [ $rc -eq 0 ]; then
   cat "$log"; echo -e "\n--- claude-ask: modo=$mode modelo=${model:-padrao}${effort:+ esforco=$effort} ---"; exit 0
 fi
 # O CLI imprime o aviso de limite no stdout com stderr vazio; só nesse formato
-# (stderr vazio, stdout curto, aviso no início) o stdout é tratado como diagnóstico.
-if [ ! -s "$err" ] && [ "$(wc -c < "$log")" -le 300 ] && head -n 1 "$log" | grep -qiE "^(you.ve hit your .*limit|claude ai usage limit reached)"; then
+# (stderr vazio ou só com linhas "Warning: ", como o aviso de expiração do login;
+# stdout curto, aviso no início) o stdout é tratado como diagnóstico.
+if ! grep -qvE '^(Warning: |$)' "$err" && [ "$(wc -c < "$log")" -le 300 ] && head -n 1 "$log" | grep -qiE "^(you.ve hit your .*limit|claude ai usage limit reached)"; then
   cat "$log" >> "$err"
 fi
 # Diagnostico bruto fica apenas no arquivo privado (0600); o stderr devolvido
