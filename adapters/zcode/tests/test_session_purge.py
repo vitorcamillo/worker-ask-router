@@ -8,7 +8,6 @@ import sqlite3
 import time
 from types import SimpleNamespace
 
-import pytest
 
 from zcode_worker import base, cli, features
 
