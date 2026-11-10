@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import signal
 import shutil
 import stat as statmod
@@ -44,6 +45,11 @@ _RUN = None
 _RUN_T0 = None
 _RUN_WRITTEN = False
 RUNS_LOG_MAX_BYTES = 5 * 1024 * 1024
+# Orcamento por task_id: 1 execucao + 3 relancamentos (refeicoes).
+MAX_RUNS_PER_TASK = 4
+TASK_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_RUN_LOG_FILES = ("runs.jsonl", "runs.jsonl.1")
+_RUN_RESULT_STATES = ("completed", "partial", "blocked", "blocked_question")
 _LOG_FD = None
 _LOG_FAILED = False
 _LOG_REPORTED = False
@@ -295,7 +301,7 @@ def _emit_executor_start(name, mode, model=None):
             _RUN["attempts"].append(start_entry)
             # Interrupcao antes da coleta nao herda metricas da tentativa anterior.
             _RUN["executor"] = name
-            for key in ("usage", "output_bytes", "changed_files"):
+            for key in ("usage", "output_bytes", "changed_files", "result"):
                 _RUN.pop(key, None)
         except Exception:
             pass
@@ -317,6 +323,27 @@ def _emit_executor_start(name, mode, model=None):
         _err(f"  ↳ {label} · Em execução")
 
 
+def _extract_run_result(stdout_data):
+    """execution_state do ultimo bloco ```json do stdout, ou None; nunca levanta."""
+    try:
+        tail = stdout_data[-262144:].decode("utf-8", "replace")
+        idx = tail.rfind("```json")
+        if idx < 0:
+            return None
+        body = tail[idx + 7:]
+        end = body.find("```")
+        if end < 0:
+            return None
+        data = json.loads(body[:end])
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        state = data.get("execution_state")
+        if state in _RUN_RESULT_STATES:
+            return state
+    return None
+
+
 def _record_run_metrics(name, stdout_data, allowed, cwd, snap_before):
     """Metricas do runs.jsonl da ultima tentativa, no sucesso e na falha.
 
@@ -334,6 +361,7 @@ def _record_run_metrics(name, stdout_data, allowed, cwd, snap_before):
         else:
             _RUN.pop("usage", None)
         _RUN["executor"] = name
+        _RUN["result"] = _extract_run_result(stdout_data)
         _RUN["output_bytes"] = len(stdout_data)
         if allowed:
             try:
@@ -406,6 +434,111 @@ def _read_bounded_file(path, limit):
         return b"".join(chunks)
     finally:
         os.close(fd)
+
+
+def _read_run_file(name):
+    """Linhas JSON validas (dict) de um arquivo do runs log; falha de leitura vira vazio."""
+    try:
+        raw = _read_bounded_file(_state_dir() / name, RUNS_LOG_MAX_BYTES + 1)
+    except Exception:
+        return
+    for line in raw.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(rec, dict):
+            yield rec
+
+
+def _count_task_runs(task_id):
+    """Runs da task_id que consomem orcamento: sem event e fora blocked_question."""
+    n = 0
+    for name in _RUN_LOG_FILES:
+        for rec in _read_run_file(name):
+            if "event" in rec or rec.get("task_id") != task_id:
+                continue
+            if rec.get("result") == "blocked_question":
+                continue
+            n += 1
+    return n
+
+
+def _find_last_task_run(task_id):
+    """Ultima linha (sem event) com a task_id; runs.jsonl precede runs.jsonl.1."""
+    for name in _RUN_LOG_FILES:
+        ultima = None
+        for rec in _read_run_file(name):
+            if "event" not in rec and rec.get("task_id") == task_id:
+                ultima = rec
+        if ultima is not None:
+            return ultima
+    return None
+
+
+def _write_redo_event(task_id, orchestrator, found):
+    """Grava evento redo pelo mesmo mecanismo de _write_run (lock/rotacao/NOFOLLOW)."""
+    global _RUN
+    _RUN = {
+        "schema": 1,
+        "event": "redo",
+        "run_id": uuid.uuid4().hex,
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "task_id": task_id,
+        "orchestrator": orchestrator,
+        "cwd": found.get("cwd"),
+        "allowed_files": found.get("allowed_files"),
+    }
+    try:
+        _write_run(0)
+    finally:
+        _RUN = None
+
+
+def _stats_summary():
+    """Resumo do runs log; log ausente ou ilegivel vira contagem zero."""
+    runs = 0
+    redo = 0
+    by_exec = {}
+    task_counts = {}
+    for name in _RUN_LOG_FILES:
+        for rec in _read_run_file(name):
+            if "event" in rec:
+                if rec.get("event") == "redo":
+                    redo += 1
+                continue
+            runs += 1
+            key = rec.get("executor")
+            key = key if isinstance(key, str) and key else "null"
+            slot = by_exec.setdefault(key, {"runs": 0, "rc": {}, "result": {}, "_durations": []})
+            slot["runs"] += 1
+            rc = rec.get("rc")
+            rc_key = str(rc) if isinstance(rc, int) and not isinstance(rc, bool) else "null"
+            slot["rc"][rc_key] = slot["rc"].get(rc_key, 0) + 1
+            result = rec.get("result")
+            result_key = result if isinstance(result, str) else "null"
+            slot["result"][result_key] = slot["result"].get(result_key, 0) + 1
+            duration = rec.get("duration_s")
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                slot["_durations"].append(duration)
+            task_id = rec.get("task_id")
+            if isinstance(task_id, str) and task_id and result != "blocked_question":
+                task_counts[task_id] = task_counts.get(task_id, 0) + 1
+    by_executor = {}
+    for key, slot in by_exec.items():
+        durations = slot.pop("_durations")
+        slot["avg_duration_s"] = round(sum(durations) / len(durations), 3) if durations else 0.0
+        by_executor[key] = slot
+    return {
+        "runs": runs,
+        "redo": redo,
+        "by_executor": by_executor,
+        "tasks_relaunched": sum(1 for n in task_counts.values() if n > 1),
+        "tasks_over_budget": sum(1 for n in task_counts.values() if n >= MAX_RUNS_PER_TASK),
+    }
 
 
 def _valid_until(value, now):
@@ -965,6 +1098,9 @@ def _main_impl(argv=None):
     parser.add_argument("--no-muse", action="store_true")
     parser.add_argument("--orchestrator", choices=list(ORCHESTRATORS))
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--task-id", help="identifica a fatia; grava task_id no runs.jsonl e habilita o orcamento de relancamentos")
+    parser.add_argument("--mark-redo", metavar="ID", help="registra evento redo para a task_id informada e sai")
+    parser.add_argument("--stats", action="store_true", help="imprime resumo JSON dos runs.jsonl e sai")
     parser.add_argument("--retry-exhausted", action="store_true")
     parser.add_argument("--allowed-file", action="append", default=[])
     parser.add_argument("--log", help="grava stdout+stderr e a linha final exit=N neste arquivo")
@@ -1004,6 +1140,10 @@ def _main_impl(argv=None):
             _err(f"erro: {e}")
             sys.exit(2)
 
+    if args.task_id is not None and not TASK_ID_RE.match(args.task_id):
+        _err("erro: --task-id invalido")
+        sys.exit(1)
+
     # status: no prompt reading
     if args.status:
         try:
@@ -1022,6 +1162,25 @@ def _main_impl(argv=None):
         status_text = json.dumps(out) + "\n"
         sys.stdout.write(status_text)
         if not _log_write(status_text.encode("utf-8", "replace")):
+            _note_log_failure()
+            sys.exit(1)
+        sys.exit(0)
+
+    if args.mark_redo is not None:
+        if not TASK_ID_RE.match(args.mark_redo):
+            _err("erro: --task-id invalido")
+            sys.exit(1)
+        achada = _find_last_task_run(args.mark_redo)
+        if achada is None:
+            _err("erro: task_id sem execucao registrada")
+            sys.exit(1)
+        _write_redo_event(args.mark_redo, args.orchestrator, achada)
+        sys.exit(0)
+
+    if args.stats:
+        stats_text = json.dumps(_stats_summary(), ensure_ascii=False) + "\n"
+        sys.stdout.write(stats_text)
+        if not _log_write(stats_text.encode("utf-8", "replace")):
             _note_log_failure()
             sys.exit(1)
         sys.exit(0)
@@ -1145,12 +1304,19 @@ def _main_impl(argv=None):
     muse_excluded = args.no_muse or muse_opted_out(cwd)
     chain = wrapper_chain(args.orchestrator, not muse_excluded, args.mode)
 
+    if args.task_id is not None:
+        n_runs = _count_task_runs(args.task_id)
+        if n_runs >= MAX_RUNS_PER_TASK:
+            _err(f"worker-ask: orcamento esgotado para task_id {args.task_id} ({n_runs} execucoes); reavalie a abordagem: o orquestrador investiga, divide com nova task_id ou assume apos 2 falhas")
+            sys.exit(1)
+
     global _RUN, _RUN_T0
     _RUN = {
         "schema": 1,
         "run_id": uuid.uuid4().hex,
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "orchestrator": args.orchestrator,
+        "task_id": args.task_id,
         "mode": args.mode,
         "cwd": cwd,
         "spec_sha256": hashlib.sha256(spec_raw).hexdigest(),

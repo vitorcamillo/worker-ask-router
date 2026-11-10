@@ -52,7 +52,7 @@ contrato_resposta="$(cat <<'CONTRATO_EOF'
 Antes do JSON, prosa curta: no maximo 8 linhas com o que fez, o que ficou pendente e o motivo (achados de revisao vao um por linha, sem esse limite). Nao cole diff, arquivo inteiro nem log longo (o orquestrador le o diff) e nao repita o que o JSON ja diz. Inclua um unico bloco ```json final; se o chamador exigir marcador terminal de protocolo (ex.: VEREDITO), preserve esse marcador em linha propria depois do JSON. O objeto JSON deve conter:
 - schema_version: 1
 - task_id: string com a task_id fornecida na tarefa, ou "unspecified" quando nao fornecida
-- execution_state: "completed", "partial" ou "blocked"
+- execution_state: "completed", "partial", "blocked" ou "blocked_question" (imprevisto que a spec nao cobre: pare, nao invente, e envie question com uma pergunta curta ao orquestrador)
 - changed_files: array de strings com caminhos relativos ao cwd
 - acceptance: array de objetos com criterion (string), status ("met", "pending" ou "blocked") e evidence (array de strings)
 - checks: array de objetos com command (array de strings argv), status ("passed", "failed", "not_run" ou "blocked"), exit_code (inteiro ou null) e evidence (array de strings)
