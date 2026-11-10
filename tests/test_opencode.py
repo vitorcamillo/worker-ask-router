@@ -152,7 +152,7 @@ class OpencodeAskTests(unittest.TestCase):
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
-        self.assertEqual(logged, ["opencode-go/gpt-6-luna"])
+        self.assertEqual(logged, ["opencode-go/deepseek-v4.1-flash"])
 
     def test_all_go_quota_reaches_free(self):
         # Cota em todos os Go baratos do auto: a cadeia chega no free do provider opencode.
@@ -178,8 +178,8 @@ class OpencodeAskTests(unittest.TestCase):
         self.assertIn("opencode-go/beam-free", logged)
 
     def test_noroute_all_exits_75(self):
-        todos = ("opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 opencode-go/mimo-v2.6-flash "
-                 "opencode-go/qwen3.8-flash opencode-go/deepseek-v4.1-flash "
+        todos = ("opencode-go/deepseek-v4.1-flash opencode-go/gpt-6-luna opencode-go/claude-haiku-5-5 "
+                 "opencode-go/mimo-v2.6-flash opencode-go/qwen3.8-flash "
                  "opencode/deepseek-v4.1-flash-free opencode-go/beam-free")
         env_extra = {"FAKE_OC_NOROUTE_MODELS": todos}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
@@ -233,29 +233,29 @@ class OpencodeAskTests(unittest.TestCase):
         self.assertEqual(logged, [])
         self.assertIn("bloqueado", r.stderr)
 
-    def test_auto_luna_expensive_starts_haiku(self):
-        # Luna caro no catalogo: o auto comeca no proximo degrau (claude-haiku-5-5), sem rc 1.
+    def test_auto_deepseek_expensive_starts_luna(self):
+        # deepseek-v4.1-flash caro no catalogo: o auto comeca no proximo degrau (gpt-6-luna), sem rc 1.
         catalog = {"opencode-go": {"models": {
-            "gpt-6-luna": {"cost": {"output": 15.0}},
+            "deepseek-v4.1-flash": {"cost": {"output": 15.0}},
+            "gpt-6-luna": {"cost": {"output": 0.5}},
             "claude-haiku-5-5": {"cost": {"output": 0.5}},
             "mimo-v2.6-flash": {"cost": {"output": 0.28}},
             "qwen3.8-flash": {"cost": {"output": 0.47}},
-            "deepseek-v4.1-flash": {"cost": {"output": 0.6}},
         }}}
         (self.home / ".cache" / "opencode" / "models.json").write_text(json.dumps(catalog))
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"])
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
-        self.assertEqual(logged, ["opencode-go/claude-haiku-5-5"])
-        self.assertIn("auto comeca em opencode-go/claude-haiku-5-5", r.stderr)
+        self.assertEqual(logged, ["opencode-go/gpt-6-luna"])
+        self.assertIn("auto comeca em opencode-go/gpt-6-luna", r.stderr)
 
     def test_auto_go_cheap_runs(self):
-        # Primeiro degrau do auto em cota: cai para o segundo Go barato (claude-haiku-5-5).
-        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode-go/gpt-6-luna"}
+        # Primeiro degrau do auto em cota: cai para o segundo Go barato (gpt-6-luna).
+        env_extra = {"FAKE_OC_QUOTA_MODELS": "opencode-go/deepseek-v4.1-flash"}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
         logged = self.log.read_text().splitlines() if self.log.exists() else []
-        self.assertIn("opencode-go/claude-haiku-5-5", logged)
+        self.assertIn("opencode-go/gpt-6-luna", logged)
 
     def test_go_expensive_blocked(self):
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "--model", "opencode-go/expensive", "task"])

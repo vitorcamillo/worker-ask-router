@@ -10,8 +10,8 @@
 #   opencode-ask --cwd <dir> --spec s.md --saida /tmp/x.txt            # volta na hora; arquivo termina com exit=N
 #
 # Degraus (Go da assinatura primeiro, depois free; modelo forte so em revisao/acao longa):
-#   auto (padrao)  Go baratos na ordem: gpt-6-luna ($0.50/M), claude-haiku-5-5 ($0.50/M),
-#                  mimo-v2.6-flash ($0.28/M), qwen3.8-flash ($0.47/M), deepseek-v4.1-flash ($0.60/M).
+#   auto (padrao)  Go baratos na ordem: deepseek-v4.1-flash ($0.60/M), gpt-6-luna ($0.50/M),
+#                  claude-haiku-5-5 ($0.50/M), mimo-v2.6-flash ($0.28/M), qwen3.8-flash ($0.47/M).
 #                  Quando todos estouram cota, cai para os free: opencode/deepseek-v4.1-flash-free
 #                  (gratis ZDR) e depois opencode-go/beam-free (retem 30d).
 #   go-pro         revisao/acao longa: opencode-go/deepseek-v4-pro ($0.66/$1.98). Worker usa o auto.
@@ -166,12 +166,12 @@ classe() { # classe do modelo; vazio = bloqueado
 fallbacks=() auto_mode=0
 if [ "$model" = auto ]; then
   auto_mode=1
-  model=opencode-go/gpt-6-luna
+  model=opencode-go/deepseek-v4.1-flash
   if [ "${OPENCODE_ASK_GO_FALLBACK:-1}" != 0 ]; then
+    fallbacks+=(opencode-go/gpt-6-luna)
     fallbacks+=(opencode-go/claude-haiku-5-5)
     fallbacks+=(opencode-go/mimo-v2.6-flash)
     fallbacks+=(opencode-go/qwen3.8-flash)
-    fallbacks+=(opencode-go/deepseek-v4.1-flash)
   fi
   if [ "${OPENCODE_ASK_FREE_FALLBACK:-1}" != 0 ]; then
     fallbacks+=(opencode/deepseek-v4.1-flash-free)
@@ -199,7 +199,7 @@ secret = ["*.env", "*.env.*", "*/.env", ".env", "*auth.json", "*.pem", "*.key", 
 def pol(action, resource, effect):
     return {"action": action, "resource": resource, "effect": effect}
 policies = [pol("provider.use", "*", "deny"), pol("provider.use", "opencode", "allow"),
-            pol("provider.use", "opencode-go", "allow"), pol("integration.use", "*", "deny"),
+            pol("provider.use", "opencode-go", "allow"), pol("mcp.use", "*", "deny"), pol("skill.use", "*", "deny"), pol("plugin.use", "*", "deny"),
             pol("tool.use", "*", "deny"), pol("tool.use", "read:*", "allow"),
             pol("tool.use", "glob:*", "allow")]
 if mode == "write":
@@ -276,11 +276,11 @@ if [ -n "$list_models" ]; then
     while read -r m; do
       c="$(classe "$m")"; [ -n "$c" ] || continue
       tag=""
-      [ "$m" = opencode-go/gpt-6-luna ] && tag="  <- padrao (auto)"
-      [ "$m" = opencode-go/claude-haiku-5-5 ] && tag="  <- 2o degrau do auto (Go)"
-      [ "$m" = opencode-go/mimo-v2.6-flash ] && tag="  <- 3o degrau do auto (Go)"
-      [ "$m" = opencode-go/qwen3.8-flash ] && tag="  <- 4o degrau do auto (Go)"
-      [ "$m" = opencode-go/deepseek-v4.1-flash ] && tag="  <- 5o degrau do auto; reserva Go"
+      [ "$m" = opencode-go/deepseek-v4.1-flash ] && tag="  <- padrao (auto)"
+      [ "$m" = opencode-go/gpt-6-luna ] && tag="  <- 2o degrau do auto (Go)"
+      [ "$m" = opencode-go/claude-haiku-5-5 ] && tag="  <- 3o degrau do auto (Go)"
+      [ "$m" = opencode-go/mimo-v2.6-flash ] && tag="  <- 4o degrau do auto (Go)"
+      [ "$m" = opencode-go/qwen3.8-flash ] && tag="  <- 5o degrau do auto (Go)"
       [ "$m" = opencode/deepseek-v4.1-flash-free ] && tag="  <- 6o degrau; free ZDR quando Go estoura"
       [ "$m" = opencode-go/beam-free ] && tag="  <- 7o degrau; free retem 30d"
       [ "$m" = opencode-go/deepseek-v4-pro ] && tag="  <- revisao/acao longa (go-pro)"
@@ -355,7 +355,7 @@ contrato_resposta="$(cat <<'CONTRATO_EOF'
 Antes do JSON, prosa curta: no maximo 8 linhas com o que fez, o que ficou pendente e o motivo (achados de revisao vao um por linha, sem esse limite). Nao cole diff, arquivo inteiro nem log longo (o orquestrador le o diff) e nao repita o que o JSON ja diz. Inclua um unico bloco ```json final; se o chamador exigir marcador terminal de protocolo (ex.: VEREDITO), preserve esse marcador em linha propria depois do JSON. O objeto JSON deve conter:
 - schema_version: 1
 - task_id: string com a task_id fornecida na tarefa, ou "unspecified" quando nao fornecida
-- execution_state: "completed", "partial" ou "blocked"
+- execution_state: "completed", "partial", "blocked" ou "blocked_question" (imprevisto que a spec nao cobre: pare, nao invente, e envie question com uma pergunta curta ao orquestrador)
 - changed_files: array de strings com caminhos relativos ao cwd
 - acceptance: array de objetos com criterion (string), status ("met", "pending" ou "blocked") e evidence (array de strings)
 - checks: array de objetos com command (array de strings argv), status ("passed", "failed", "not_run" ou "blocked"), exit_code (inteiro ou null) e evidence (array de strings)
@@ -518,7 +518,6 @@ for prox in "${fallbacks[@]}"; do
       continue
     }
     sufixo=""
-    [ "$prox" = opencode-go/deepseek-v4.1-flash ] && sufixo=" (consome % da assinatura Go)"
     echo "opencode-ask: $model sem cota; usando $prox$sufixo" >&2
     model="$prox"; effort="$effort0"
     tenta "$model"
