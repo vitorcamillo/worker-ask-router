@@ -980,6 +980,21 @@ def test_launcher_diagnostic_without_effects_falls_back(fake_env):
     assert len(log.read_text().splitlines()) == 2
 
 
+def test_launcher_without_effects_but_snapshot_changed_blocks_fallback(fake_env):
+    (fake_env["work"] / "a.txt").write_text("original\n")
+    log = fake_env["tmp"] / "calls.jsonl"
+    r = run_cli(fake_env, ["--mode", "write", "--allowed-file", "a.txt", "hi"], {
+        "FAKE_RC_ZCODE_WORKER": "1", "FAKE_STDERR": LAUNCHER_MESSAGE + "\nprivate-secret",
+        "FAKE_LOG": str(log), "FAKE_MODE_ZCODE_WORKER": "writefile",
+        "FAKE_WRITE_REL": "a.txt", "FAKE_WRITE_CONTENT": "changed\n",
+    })
+    assert r.returncode == 1
+    assert b"launcher de autenticacao incompativel com o bundle; fallback bloqueado (rc=1)" in r.stderr
+    assert b"private-secret" not in r.stdout + r.stderr
+    assert (fake_env["work"] / "a.txt").read_text() == "changed\n"
+    assert len(log.read_text().splitlines()) == 1
+
+
 @pytest.mark.parametrize("raw", ["private-secret", LAUNCHER_MESSAGE + " token=private-secret", "prefix " + LAUNCHER_MESSAGE, "", LAUNCHER_MESSAGE.replace("ZCode", "other")])
 def test_launcher_unknown_stderr_stays_private(fake_env, raw):
     r = run_cli(fake_env, ["--mode", "plan", "hi"], {"FAKE_RC_ZCODE_WORKER": "1", "FAKE_STDERR": raw})

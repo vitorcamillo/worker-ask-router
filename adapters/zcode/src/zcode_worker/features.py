@@ -736,6 +736,8 @@ def ensure_credential_secret(auth_base: str) -> None:
         try:
             with os.fdopen(fd, "w", encoding="ascii") as handle:
                 handle.write(os.urandom(48).hex())
+                handle.flush()
+                os.fsync(handle.fileno())
             os.link(temp, target)  # atômico: não sobrescreve se outro processo criou antes
         finally:
             os.unlink(temp)

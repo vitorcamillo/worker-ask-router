@@ -65,8 +65,8 @@ function once(source, pattern, build) {
 function loginStoreNames(source) {
   const anchor = ID + "=e\\.credentialStore\\?\\?" + ID + "\\(\\{env:[\\w$]+\\}\\),[\\w$]+=await \\1\\.captureRecoveryGuard\\(\\)";
   const found = [...source.matchAll(new RegExp(anchor, "g"))];
-  if (found.length > 1) return null;
-  return found.length === 1 ? { store: found[0][1], factory: found[0][2] } : { store: "v", factory: "KE" };
+  if (found.length !== 1) return null;
+  return { store: found[0][1], factory: found[0][2] };
 }
 
 const LOGIN_CALL = "([\\w$]+\\(`\\$\\{[\\w$]+\\}/api/auth/z/login`,\\{method:\"POST\",headers:\\{\"Content-Type\":\"application/json\"\\},body:JSON\\.stringify\\(\\{token:\\2\\}\\)\\}\\))";

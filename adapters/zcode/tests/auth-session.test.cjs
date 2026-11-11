@@ -425,6 +425,7 @@ test("launcher falha fechado em drift e aplica os pontos de integração da fixt
     "const e={locationStore:null,httpClient:null,env:{},credentialStore:null}; const h='synthetic-oauth'; const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}}; const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}}); const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a),f=!1;return await Hq(async g=>{let w=g[c];w===void 0||await o.decrypt(w)!==u||(delete g[c],f=!0)}),f}};",
     "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
     "function obc(e){globalThis.__oauthStore=e.credentialStore;globalThis.__oauthEvents.push('business');if(process.argv.includes('--oauth-failure'))throw new Error('synthetic-business-failure');return Promise.resolve({token:'synthetic-business'});} function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
+    "async function __storeAnchor(e){const v=e.credentialStore??KE({env:t}),g=await v.captureRecoveryGuard();return g;}",
     "const Nae=async(value)=>value; async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{if(process.argv.includes('--persist-failure'))throw new Error('synthetic-persist-failure');globalThis.__oauthEvents.push('oauth')}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;} async function oauthReady(){return Ooi({httpClient:null});}",
     "async function retry(){const v={business:{token:'synthetic-business'}}; if(n.wasRejected&&n.wasRejected(v.business)){n.invalidate(v.business)}}",
     "function ttt(){};ttt();NPc();async function NPc(){await new Promise((resolve)=>setImmediate(resolve));globalThis.__fixtureArgv=process.argv[1];globalThis.__oauthEvents=[];globalThis.__oauthStore=null;try{await oauthReady();globalThis.__oauthResult='success';}catch(error){globalThis.__oauthResult='failed';}if(process.argv[2]==='--version')process.stdout.write('fixture-version\\n');}",
@@ -453,6 +454,22 @@ test("launcher falha fechado em drift e aplica os pontos de integração da fixt
   assert.match(patched, /invalidateBusiness/);
   assert.match(patched, /saveIfValue/);
   assert.match(patched, /saveZaiLoginCredentials/);
+});
+
+test("launcher falha fechado sem a âncora do credential store", () => {
+  const anchorLine = "async function __storeAnchor(e){const v=e.credentialStore??KE({env:t}),g=await v.captureRecoveryGuard();return g;}";
+  const withAnchor = [
+    "const e={locationStore:null,httpClient:null,env:{},credentialStore:null}; const h='synthetic-oauth'; const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}}; const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}}); const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a),f=!1;return await Hq(async g=>{let w=g[c];w===void 0||await o.decrypt(w)!==u||(delete g[c],f=!0)}),f}};",
+    "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
+    "function obc(e){globalThis.__oauthStore=e.credentialStore;return Promise.resolve({token:'synthetic-business'});} function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
+    anchorLine,
+    "const Nae=async(value)=>value; async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;}",
+    "async function retry(){const v={business:{token:'synthetic-business'}}; if(n.wasRejected&&n.wasRejected(v.business)){n.invalidate(v.business)}}",
+    "function ttt(){};ttt();NPc();async function NPc(){}",
+  ].join("\n");
+  assert.doesNotThrow(() => launcher.patchSource(withAnchor));
+  assert.throws(() => launcher.patchSource(withAnchor.replace(anchorLine, "")), /patch drift: resolver store/);
+  assert.throws(() => launcher.patchSource(withAnchor.replace("captureRecoveryGuard", "captureOtherGuard")), /patch drift: resolver store/);
 });
 
 test("candidate preserva os caminhos estáveis do launcher e da admissão", () => {
@@ -505,6 +522,7 @@ test("fixture executável exercita a autenticação Start Plan inserida no bundl
     "const e={locationStore:null,httpClient:null,env:{},credentialStore:null};const h='synthetic-oauth';const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}};const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}});const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a),f=!1;return await Hq(async g=>{let w=g[c];w===void 0||await o.decrypt(w)!==u||(delete g[c],f=!0)}),f}};",
     "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
     "function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
+    "async function __storeAnchor(e){const v=e.credentialStore??KE({env:t}),g=await v.captureRecoveryGuard();return g;}",
     "function obc(e){return Promise.resolve({token:'synthetic-business'})}const Nae=async(value)=>value;async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;}",
     "async function retry(){const v={business:{token:'synthetic-business'}};if(n.wasRejected&&n.wasRejected(v.business)){n.invalidate(v.business)}}",
     "const catalog={individual:{type:'zhipu-account',mode:'individual-coding-plan',accountType:'coding'},start:{type:'zhipu-account',mode:'start-plan',accountType:'coding'},team:{type:'zhipu-account',mode:'team',accountType:'coding'}};function accepts(c,u){return c?.type===\"zhipu-account\"&&c.mode===\"individual-coding-plan\"&&c.accountType&&u}",
