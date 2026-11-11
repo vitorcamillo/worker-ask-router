@@ -108,3 +108,48 @@ def test_temporary_provider_remove_orfaos_vencidos(tmp_path, monkeypatch):
         assert Path(path).exists()
         assert Path(path).name.startswith("provider-")
     assert not Path(path).exists()
+
+
+def _store_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / ".zcode" / "v2"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def test_chave_local_do_store_e_criada_uma_vez_e_privada(tmp_path):
+    directory = _store_dir(tmp_path)
+    features.ensure_credential_secret(str(tmp_path))
+    target = directory / "credential-secret"
+    first = target.read_text(encoding="ascii")
+    # limites que a CLI exige: 32..4096 bytes, sem permissão para grupo/outros
+    assert 32 <= len(first) <= 4096
+    assert target.stat().st_mode & 0o077 == 0
+    features.ensure_credential_secret(str(tmp_path))
+    assert target.read_text(encoding="ascii") == first
+    assert sorted(p.name for p in directory.iterdir()) == ["credential-secret"]
+
+
+def test_chave_local_nao_toca_store_do_keyring_nem_base_ausente(tmp_path):
+    directory = _store_dir(tmp_path)
+    (directory / "credential-source").write_text("os\n", encoding="ascii")
+    features.ensure_credential_secret(str(tmp_path))
+    assert not (directory / "credential-secret").exists()
+    features.ensure_credential_secret(str(tmp_path / "ausente"))
+    assert not (tmp_path / "ausente").exists()
+
+
+def test_config_do_worker_nao_deixa_provider_de_terceiro_como_fallback():
+    alheio, pago = "claude-code", "account:zai-individual-coding-plan"
+    config = {
+        "providerOrder": [alheio, pago],
+        "providerConfigRules": {"providerRules": [{"providerId": alheio}, {"providerId": pago}]},
+        "modelConfigRules": {
+            "providerModelRules": [{"providerId": alheio}, {"providerId": pago}],
+            "manualProviderModelRules": [{"providerId": alheio}],
+        },
+    }
+    features._only_worker_providers(config)
+    assert config["providerOrder"] == [pago]
+    assert config["providerConfigRules"]["providerRules"] == [{"providerId": pago}]
+    assert config["modelConfigRules"]["providerModelRules"] == [{"providerId": pago}]
+    assert config["modelConfigRules"]["manualProviderModelRules"] == []

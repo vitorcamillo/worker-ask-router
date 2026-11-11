@@ -173,10 +173,11 @@ def run_mutation() -> int:
 
 
 def fixture_bundle() -> str:
-    # Nomes portados para o bundle de 02/11/2026; referência: fixture já atualizada
+    # Nomes do bundle de 02/11/2026 de propósito: exercita o casamento por estrutura
+    # (FLEX) do launcher; só a forma do CAS é a do 3.18.0. Referência: fixture
     # em tests/auth-session.test.cjs (linhas ~412–426 e ~495–506).
     return "\n".join([
-        "const e={locationStore:null,httpClient:null,env:{},credentialStore:null};const h='synthetic-oauth';const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}};const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}});const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a)}};",
+        "const e={locationStore:null,httpClient:null,env:{},credentialStore:null};const h='synthetic-oauth';const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}};const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}});const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a),f=!1;return await Hq(async g=>{let w=g[c];w===void 0||await o.decrypt(w)!==u||(delete g[c],f=!0)}),f}};",
         "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
         "function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
         "function obc(e){return Promise.resolve({token:'synthetic-business'})}const Nae=async(value)=>value;async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;}",

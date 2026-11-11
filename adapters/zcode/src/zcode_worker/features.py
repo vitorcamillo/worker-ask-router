@@ -718,6 +718,55 @@ def verify_effective(
     return actual
 
 
+def ensure_credential_secret(auth_base: str) -> None:
+    """Garante a chave local do credential store do worker (ZCode >= 3.18).
+
+    A partir do 3.18 a CLI cifra as credenciais com chave do keyring do SO, que só o
+    app desktop alcança; standalone, o store falha e nenhum provider de conta fica
+    habilitado ("Select a model before sending a message"). A alternativa suportada é
+    um `credential-secret` 0600 ao lado do credentials.json. Store já preso ao keyring
+    (`credential-source`) não é tocado. Nunca sobrescreve chave existente.
+    """
+    directory = Path(auth_base) / ".zcode" / "v2"
+    target = directory / "credential-secret"
+    if not directory.is_dir() or target.exists() or (directory / "credential-source").exists():
+        return
+    try:
+        fd, temp = tempfile.mkstemp(prefix=".credential-secret.", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="ascii") as handle:
+                handle.write(os.urandom(48).hex())
+            os.link(temp, target)  # atômico: não sobrescreve se outro processo criou antes
+        finally:
+            os.unlink(temp)
+    except OSError:
+        pass
+
+
+def _only_worker_providers(config: dict) -> None:
+    """Tira providers alheios (claude-code, chatgpt-codex...) da cópia temporária.
+
+    A CLI 3.18+ cai em silêncio no primeiro provider de providerOrder quando a
+    seleção pedida não resolve; sem eles a queda vira erro, não outro modelo.
+    """
+
+    node = config.get("config") if isinstance(config.get("config"), dict) else config
+
+    def keep(provider_id: object) -> bool:
+        return isinstance(provider_id, str) and provider_id.startswith(("account:zai-", "account:bigmodel-"))
+
+    if isinstance(node.get("providerOrder"), list):
+        node["providerOrder"] = [item for item in node["providerOrder"] if keep(item)]
+    for group, keys in (
+        ("providerConfigRules", ("providerRules",)),
+        ("modelConfigRules", ("providerModelRules", "manualProviderModelRules")),
+    ):
+        rules = node.get(group)
+        for key in keys if isinstance(rules, dict) else ():
+            if isinstance(rules.get(key), list):
+                rules[key] = [r for r in rules[key] if isinstance(r, dict) and keep(r.get("providerId"))]
+
+
 def _purge_stale_provider_files(directory: Path) -> None:
     """Remove best-effort órfãos provider-*.json mais velhos que o TTL.
 
@@ -789,6 +838,7 @@ def temporary_provider(model: str, effort: str, *, state_dir: str | os.PathLike[
     _purge_stale_provider_files(directory)
     try:
         config = base.carregar_config_provider(model, effort)
+        _only_worker_providers(config)
         if provider is not None:
             if isinstance(config.get("config"), dict):
                 config["config"]["defaultModelSelection"]["providerId"] = provider

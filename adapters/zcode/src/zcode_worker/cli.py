@@ -471,6 +471,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
             env = dict(os.environ)
             env["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] = provider_path
             env["ZCODE_DATA_BASE_DIR"] = base.AUTH_BASE
+            features.ensure_credential_secret(base.AUTH_BASE)
             if _provider == features.START_PLAN_PROVIDER_ID:
                 env["ZCODE_WORKER_START_PLAN_PATCHES"] = "1"
             else:

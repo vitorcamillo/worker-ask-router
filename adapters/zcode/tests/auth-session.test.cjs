@@ -71,10 +71,17 @@ function createNativeStore(filePath) {
   assert.ok(bundlePath, "bundle nativo ausente");
   const filename = path.resolve(bundlePath);
   const source = launcher.patchSource(fs.readFileSync(filename, "utf8"));
-  const lifecycle = "ttt();globalThis.__zcodeAuthSessionCandidate.runBundleMain(NPc);async function NPc()";
-  assert.equal(source.split(lifecycle).length - 1, 1);
-  const bootstrap = "ttt();tgt();module.exports={createStore:NP};async function NPc()";
-  const isolated = source.replace(lifecycle, bootstrap);
+  // nomes minificados mudam a cada release: descobre pela forma, não pelo nome
+  const lifecycle = /([\w$]+)\(\);globalThis\.__zcodeAuthSessionCandidate\.runBundleMain\(([\w$]+)\);async function \2\(\)/g;
+  assert.equal([...source.matchAll(lifecycle)].length, 1);
+  const factory = /=e\.credentialStore\?\?([\w$]+)\(\{env:[\w$]+\}\),[\w$]+=await [\w$]+\.captureRecoveryGuard\(\)/.exec(source);
+  assert.ok(factory, "fábrica do credential store ausente");
+  // lazy-init do módulo que define a fábrica (o `var X=W(()=>{` que contém o registro dela)
+  const registered = source.indexOf(`r(${factory[1]},"`);
+  const moduleInit = /([\w$]+)=[\w$]+\(\(\)=>\{$/.exec(source.slice(0, source.lastIndexOf("(()=>{", registered) + 6));
+  assert.ok(moduleInit, "inicializador do módulo do credential store ausente");
+  const isolated = source.replace(lifecycle, (_m, init, main) =>
+    `${init}();${moduleInit[1]}();module.exports={createStore:${factory[1]}};async function ${main}()`);
   const bundle = new Module(filename, module);
   bundle.filename = filename;
   bundle.paths = Module._nodeModulePaths(path.dirname(filename));
@@ -163,7 +170,7 @@ test("CAS nativo criptografado cria, rejeita concorrência e atualiza em arquivo
     assert.equal(await store.saveIfValue(key, "v1", "v2"), true);
     assert.equal(await store.load(key), "v2");
     const record = JSON.parse(fs.readFileSync(file, "utf8"));
-    assert.match(record[key], /^enc:v1:/);
+    assert.match(record[key], /^enc:v\d+:/);
     assert.notEqual(record[key], "v2");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -415,7 +422,7 @@ test("launcher falha fechado em drift e aplica os pontos de integração da fixt
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zcode-launch-") );
   const fixture = path.join(directory, "fixture.cjs");
   const source = [
-    "const e={locationStore:null,httpClient:null,env:{},credentialStore:null}; const h='synthetic-oauth'; const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}}; const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}}); const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a)}};",
+    "const e={locationStore:null,httpClient:null,env:{},credentialStore:null}; const h='synthetic-oauth'; const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}}; const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}}); const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a),f=!1;return await Hq(async g=>{let w=g[c];w===void 0||await o.decrypt(w)!==u||(delete g[c],f=!0)}),f}};",
     "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
     "function obc(e){globalThis.__oauthStore=e.credentialStore;globalThis.__oauthEvents.push('business');if(process.argv.includes('--oauth-failure'))throw new Error('synthetic-business-failure');return Promise.resolve({token:'synthetic-business'});} function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
     "const Nae=async(value)=>value; async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{if(process.argv.includes('--persist-failure'))throw new Error('synthetic-persist-failure');globalThis.__oauthEvents.push('oauth')}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;} async function oauthReady(){return Ooi({httpClient:null});}",
@@ -495,13 +502,13 @@ test("fixture executável exercita a autenticação Start Plan inserida no bundl
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zcode-start-plan-"));
   const fixture = path.join(directory, "fixture.cjs");
   const source = [
-    "const e={locationStore:null,httpClient:null,env:{},credentialStore:null};const h='synthetic-oauth';const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}};const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}});const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a)}};",
+    "const e={locationStore:null,httpClient:null,env:{},credentialStore:null};const h='synthetic-oauth';const n={resolve:async(_g,fn)=>fn(),invalidate:()=>{}};const o=async()=>({code:0,data:{access_token:'synthetic-business',expires_in:300}});const nativeStore={async deleteIfValue(i,a){let c=pj(i),u=OK(a),f=!1;return await Hq(async g=>{let w=g[c];w===void 0||await o.decrypt(w)!==u||(delete g[c],f=!0)}),f}};",
     "function Yht(){return n.resolve(h,()=>o(`${Kgo}/api/auth/z/login`,{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({token:h})}))}",
     "function resolverMarker(e){return Yht({httpClient:e.httpClient??r0i(e.env)})}",
     "function obc(e){return Promise.resolve({token:'synthetic-business'})}const Nae=async(value)=>value;async function Ooi(e){const b={saveZaiLoginCredentials:async()=>{}};const n='zai';const t={};const u=undefined;const v={loginStore:'fixture'};const R=await Promise.resolve({accessToken:'synthetic-oauth',token:'synthetic-jwt',user:{}}),N=await Nae(obc({accessToken:R.accessToken,env:t,httpClient:e.httpClient,family:n,resolver:e.apiKeyResolver,signal:u}),u);if(n==='zai')await b.saveZaiLoginCredentials({accessToken:R.accessToken,jwtToken:R.token,user:R.user});return N;}",
     "async function retry(){const v={business:{token:'synthetic-business'}};if(n.wasRejected&&n.wasRejected(v.business)){n.invalidate(v.business)}}",
     "const catalog={individual:{type:'zhipu-account',mode:'individual-coding-plan',accountType:'coding'},start:{type:'zhipu-account',mode:'start-plan',accountType:'coding'},team:{type:'zhipu-account',mode:'team',accountType:'coding'}};function accepts(c,u){return c?.type===\"zhipu-account\"&&c.mode===\"individual-coding-plan\"&&c.accountType&&u}",
-    "async function applyHeaders(e,u,f){if(!f||f.mode!==\"individual-coding-plan\")throw new Error(`Standalone Account Provider \\u8BF7\\u6C42\\u8EAB\\u4EFD\\u65E0\\u6548: ${u}`);return{headersApplied:!0,individual:!0}}",
+    "async function applyHeaders(e,u,d){if(!d||d.mode!==\"individual-coding-plan\")throw new Error(`Standalone Account Provider \\u8BF7\\u6C42\\u8EAB\\u4EFD\\u65E0\\u6548: ${u}`);return{headersApplied:!0,individual:!0}}",
     "async function runScenarios(){globalThis.__startPlanOutcomes=[];const out=globalThis.__startPlanOutcomes;const loader=(value)=>({load:async(key)=>key==='zcodejwttoken'?value:undefined});const attempt=async(name,value,account)=>{try{const applied=await applyHeaders(loader(value),'synthetic-url',account);out.push(name+':ok:headers='+applied.headersApplied+':apiKey='+(applied.requestAuth?applied.requestAuth.apiKey:'none'));}catch(error){out.push(name+':throw:'+error.message);}};await attempt('valid','  synthetic-start-jwt  ',catalog.start);await attempt('missing',null,catalog.start);await attempt('empty','',catalog.start);await attempt('blank','   ',catalog.start);await attempt('team','synthetic-team-jwt',catalog.team);await attempt('individual','synthetic-individual-jwt',catalog.individual);await attempt('anonymous',null,null);out.push('catalog:individual:'+accepts(catalog.individual,'catalog-token'));out.push('catalog:start:'+accepts(catalog.start,'catalog-token'));out.push('catalog:team:'+accepts(catalog.team,'catalog-token'));}",
     "function ttt(){};ttt();NPc();async function NPc(){globalThis.__startPlanReady=runScenarios();}",
   ].join("\n");
