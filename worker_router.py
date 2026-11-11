@@ -973,10 +973,14 @@ def _terminate_group(proc):
 
 
 def _safe_failure_marker(stderr_data):
-    # Somente diagnóstico: não prova ausência de efeitos nem autoriza fallback.
+    # Somente diagnóstico: quem decide o fallback é o laço principal, que ainda confere
+    # o snapshot dos arquivos autorizados. Com aviso de efeitos, o marcador é outro.
     message = b"ERRO: launcher de autenticacao incompativel com o bundle do ZCode"
     warning = b" Arquivos podem ter sido alterados; revise o diff antes de tentar novamente."
-    if any(line in (message, message + warning) for line in stderr_data.splitlines()):
+    lines = stderr_data.splitlines()
+    if message + warning in lines:
+        return b"launcher_incompatible_effects"
+    if message in lines:
         return b"launcher_incompatible"
     if any(line.startswith(b"ERRO: fila de admiss") and b"nenhum worker iniciado" in line for line in stderr_data.splitlines()):
         return b"admission_busy"
@@ -1459,7 +1463,26 @@ def _main_impl(argv=None):
             sys.exit(rc)
 
         if rc != 0:
-            if name == "zcode-worker" and rc == 1 and stderr_data == b"launcher_incompatible":
+            launcher = name == "zcode-worker" and rc == 1 and stderr_data.startswith(b"launcher_incompatible")
+            if launcher and stderr_data == b"launcher_incompatible":
+                # O launcher aborta antes de qualquer chamada a modelo; ainda assim só segue
+                # a cadeia se os arquivos autorizados estiverem intactos (mesma regra do rc 75).
+                unchanged = True
+                if allowed:
+                    try:
+                        unchanged = snapshot_allowed(cwd, allowed) == snap_before
+                    except RuntimeError:
+                        unchanged = False
+                if unchanged and time.monotonic() < deadline:
+                    _err("zcode-worker: launcher de autenticacao incompativel com o bundle; "
+                         "CORRIGIR o launch.cjs. Seguindo para o proximo worker (rc=1)")
+                    _event("fallback", f"{name}: rc=1, fallback", executor=name, rc=1,
+                           reason="launcher_incompativel")
+                    if _LOG_FAILED:
+                        _note_log_failure()
+                        sys.exit(1)
+                    continue
+            if launcher:
                 _err("zcode-worker: launcher de autenticacao incompativel com o bundle; fallback bloqueado (rc=1)")
             _event("stop", f"{name}: rc={rc}", executor=name, rc=rc, detail="falha")
             sys.exit(rc if rc > 0 else 1)

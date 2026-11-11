@@ -954,17 +954,30 @@ LAUNCHER_MESSAGE = "ERRO: launcher de autenticacao incompativel com o bundle do 
 EFFECTS_WARNING = " Arquivos podem ter sido alterados; revise o diff antes de tentar novamente."
 
 
-@pytest.mark.parametrize("warning", ["", EFFECTS_WARNING])
-def test_launcher_diagnostic_stops_without_fallback(fake_env, warning):
+def test_launcher_diagnostic_with_effects_stops_without_fallback(fake_env):
     log = fake_env["tmp"] / "calls.jsonl"
     r = run_cli(fake_env, ["--mode", "write", "--allowed-file", "a.txt", "hi"], {
-        "FAKE_RC_ZCODE_WORKER": "1", "FAKE_STDERR": LAUNCHER_MESSAGE + warning + "\nprivate-secret",
+        "FAKE_RC_ZCODE_WORKER": "1", "FAKE_STDERR": LAUNCHER_MESSAGE + EFFECTS_WARNING + "\nprivate-secret",
         "FAKE_LOG": str(log),
     })
     assert r.returncode == 1
     assert b"launcher de autenticacao incompativel com o bundle; fallback bloqueado (rc=1)" in r.stderr
     assert b"private-secret" not in r.stdout + r.stderr
     assert len(log.read_text().splitlines()) == 1
+
+
+def test_launcher_diagnostic_without_effects_falls_back(fake_env):
+    # Launcher quebrado por update do ZCode não pode derrubar a cadeia inteira.
+    log = fake_env["tmp"] / "calls.jsonl"
+    r = run_cli(fake_env, ["--mode", "write", "--allowed-file", "a.txt", "hi"], {
+        "FAKE_RC_ZCODE_WORKER": "1", "FAKE_STDERR": LAUNCHER_MESSAGE + "\nprivate-secret",
+        "FAKE_LOG": str(log),
+    })
+    assert r.returncode == 0
+    assert b"Seguindo para o proximo worker (rc=1)" in r.stderr
+    assert b"fallback bloqueado" not in r.stderr
+    assert b"private-secret" not in r.stdout + r.stderr
+    assert len(log.read_text().splitlines()) == 2
 
 
 @pytest.mark.parametrize("raw", ["private-secret", LAUNCHER_MESSAGE + " token=private-secret", "prefix " + LAUNCHER_MESSAGE, "", LAUNCHER_MESSAGE.replace("ZCode", "other")])

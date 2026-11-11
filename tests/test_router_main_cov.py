@@ -582,10 +582,19 @@ def test_generic_failure_rc_stops(cov_env, monkeypatch):
     assert run_main(base_args(cov_env)) == 2
 
 
-def test_launcher_diagnostic_stops_without_fallback(cov_env, monkeypatch, capsys):
+def test_launcher_diagnostic_falls_back(cov_env, monkeypatch, capsys):
     monkeypatch.setenv("FAKE_RC_ZCODE_WORKER", "1")
     monkeypatch.setenv("FAKE_STDERR",
                        "ERRO: launcher de autenticacao incompativel com o bundle do ZCode")
+    assert run_main(base_args(cov_env)) == 0
+    assert "Seguindo para o proximo worker (rc=1)" in capsys.readouterr().err
+
+
+def test_launcher_diagnostic_with_effects_stops_without_fallback(cov_env, monkeypatch, capsys):
+    monkeypatch.setenv("FAKE_RC_ZCODE_WORKER", "1")
+    monkeypatch.setenv("FAKE_STDERR",
+                       "ERRO: launcher de autenticacao incompativel com o bundle do ZCode"
+                       " Arquivos podem ter sido alterados; revise o diff antes de tentar novamente.")
     assert run_main(base_args(cov_env)) == 1
     assert "fallback bloqueado (rc=1)" in capsys.readouterr().err
 
