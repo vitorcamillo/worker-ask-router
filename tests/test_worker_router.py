@@ -85,6 +85,9 @@ def fake_env(tmp_path, monkeypatch):
     state = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("WORKER_ASK_MIN_TIMEOUT", "0")
+    # Start Plan desligado por padrão (como no conftest do adapter): cooldown
+    # do zcode vale. Testes do Start religam com delenv.
+    monkeypatch.setenv("ZCODE_WORKER_START_PLAN", "0")
     # Testa o roteador cru; a apresentação tem testes próprios.
     monkeypatch.setenv("ASK_PRESENTATION_ACTIVE", "1")
     monkeypatch.delenv("ASK_PRESENTATION_FD", raising=False)

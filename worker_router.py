@@ -1492,6 +1492,12 @@ def _main_impl(argv=None):
             _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
         if not args.retry_exhausted:
             entry = cache.get(name)
+            if entry and name == "zcode-worker" and entry.get("blocked_reason") != "timeout":
+                # Cooldown de cota do zcode não vale com o Start Plan livre: o
+                # worker usa o Start primeiro (o sucesso limpa a entrada).
+                from quota_provider import start_plan_free
+                if start_plan_free():
+                    entry = None
             if entry and time.time() < entry["until"]:
                 _event("skip", f"{name}: skip (cooldown)", executor=name, reason="cooldown")
                 continue

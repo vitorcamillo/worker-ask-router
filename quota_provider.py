@@ -1,5 +1,6 @@
 """Consulta de reset sem inferencia e sem gerar chamadas de modelo."""
 
+import datetime
 import json
 import os
 from pathlib import Path
@@ -42,9 +43,36 @@ def _read_cache(path):
         os.close(fd)
 
 
-def query_reset(wrapper, now=None, budget=10.0):
+def _start_plan_until(now):
+    """Retorna até quando o Start Plan está indisponível, ou None se livre."""
+    if os.environ.get("ZCODE_WORKER_START_PLAN", "").strip().lower() in {
+        "0",
+        "off",
+        "false",
+        "no",
+    }:
+        return float("inf")
+    state = os.environ.get(
+        "ZCODE_WORKER_CONTEXT_STATE", str(Path.home() / ".local/state/zcode-worker")
+    )
+    try:
+        text = (Path(state) / "start-plan-unavailable").read_text()
+        until = datetime.datetime.fromisoformat(text.split()[0])
+        if until.tzinfo is not None:
+            return None
+        ts = until.timestamp()
+    except (OSError, ValueError, IndexError):
+        return None
+    return ts if ts > now else None
+
+
+def start_plan_free(now=None):
+    """True quando o Start Plan do zcode-worker pode ser tentado agora."""
+    return _start_plan_until(time.time() if now is None else now) is None
+
+
+def _query_plan_reset(wrapper, now, budget):
     """Retorna reset comprovado ou None (disponibilidade desconhecida)."""
-    now = time.time() if now is None else now
     if budget <= 0:
         return None
     budget = min(10.0, budget)
@@ -117,3 +145,17 @@ def query_reset(wrapper, now=None, budget=10.0):
                 proc.wait()
     except (OSError, ValueError, TypeError, RecursionError):
         return None
+
+
+def query_reset(wrapper, now=None, budget=10.0):
+    """Reset efetivo do zcode-worker: Start Plan livre libera sem consultar o pago."""
+    now = time.time() if now is None else now
+    if wrapper != "zcode-worker":
+        return _query_plan_reset(wrapper, now, budget)
+    start = _start_plan_until(now)
+    if start is None:
+        return None
+    paid = _query_plan_reset(wrapper, now, budget)
+    if paid is None:
+        return None
+    return min(paid, start)

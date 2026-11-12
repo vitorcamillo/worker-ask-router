@@ -219,14 +219,15 @@ def _probe_error_until(error: features.FeatureError) -> datetime.datetime | None
 def _fail_attempt(args, stdout, returncode, stderr, *, db_path=None) -> features.FeatureError:
     """Classifica a tentativa falha e apaga a sessão extraída do stdout.
 
-    Exceção: Start em edit/yolo com rate_limit guarda o stdout em
+    Exceção: Start em edit/yolo com rate_limit ou quota guarda o stdout em
     ``args._rate_limit_stdout`` e adia a exclusão, porque run_task precisa da
-    sessão viva no DB para checar efeitos antes de decidir entre repetir a
-    fatia e cair para o plano pago; quem consome o stdout faz a exclusão.
+    sessão viva no DB para checar efeitos antes de decidir (rate_limit: esgotar
+    ou exit 75; quota: esgotar ou cair no plano pago); quem consome o stdout
+    faz a exclusão.
     """
     failure = _classify_process_failure(returncode, stderr)
     if (
-        failure.code == "rate_limit"
+        failure.code in {"rate_limit", "quota"}
         and getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID
         and args.mode in {"edit", "yolo"}
     ):
@@ -426,9 +427,10 @@ def _retry_allowed(args, error, attempt, deadline):
         return False
     if getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID:
         # Rate limit do Start em plan é transitório (concorrência): tentar de
-        # novo com atrasos curtos antes de liberar o fallback pago. Sem prazo
-        # para o próximo atraso, devolve False para o fallback pagar rodar em
-        # vez de o erro virar timeout.
+        # novo com atrasos curtos, sempre no Start. O retry nunca libera o
+        # plano pago; esgotado, o erro propaga e vira exit 75 (relance).
+        # Sem prazo para o próximo atraso, devolve False para o erro
+        # propagar em vez de virar timeout.
         delays = START_PLAN_RETRY_DELAYS
         if attempt >= len(delays):
             return False
@@ -1029,7 +1031,13 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 except features.FeatureError as _probe_error:
                     _probe_code = getattr(_probe_error, "code", None)
                     if _probe_code == "rate_limit":
+                        # Start ocupado na sonda: transitório, sem plano pago
+                        # nesta chamada nem nas próximas — o orquestrador relança.
                         features.mark_start_plan_unavailable("refused")
+                        raise features.FeatureError(
+                            "Start Plan ocupado (rate limit); o plano pago não é usado — relance em instantes",
+                            "quota",
+                        ) from _probe_error
                     elif _probe_code == "quota":
                         features.mark_start_plan_unavailable("quota", until=_probe_error_until(_probe_error))
                     elif _probe_code == "start_plan_drift":
@@ -1074,18 +1082,41 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 if _code == "start_plan_drift":
                     features.mark_start_plan_unavailable("drift")
                     _fallback = "drift"
+                elif _code == "rate_limit":
+                    # Start ocupado na execução: transitório, nunca vira plano
+                    # pago — nem nesta chamada (sem segunda perna) nem nas
+                    # próximas (o marcador não bloqueia o provider).
+                    features.mark_start_plan_unavailable("rate_limit")
+                    # A checagem de efeitos precisa da sessão ainda viva no
+                    # DB: sem ela a detecção vira conservadora (True).
+                    _rate_limit_effects = args.mode != "plan" and _start_attempt_had_effects(
+                        args.cwd, start_ms, db_path=db_path
+                    )
+                    # Exclusão adiada por _fail_attempt: agora que os efeitos
+                    # já foram lidos, a sessão falha pode ser apagada.
+                    _deferred_stdout = getattr(args, "_rate_limit_stdout", None)
+                    args._rate_limit_stdout = None
+                    if _deferred_stdout is not None:
+                        _delete_session_from_stdout(_deferred_stdout, db_path=db_path, keep=(args.resume,))
+                    if _rate_limit_effects:
+                        raise features.FeatureError(
+                            "Start Plan ocupado durante a fatia; revise o diff e relance",
+                            "start_plan_exhausted",
+                        ) from _error
+                    raise features.FeatureError(
+                        "Start Plan ocupado (rate limit); o plano pago não é usado — relance em instantes",
+                        "quota",
+                    ) from _error
                 else:
-                    if _code == "quota":
-                        features.mark_start_plan_unavailable("quota", until=_probe_error_until(_error))
-                    elif _code == "rate_limit":
-                        features.mark_start_plan_unavailable("rate_limit")
+                    features.mark_start_plan_unavailable("quota", until=_probe_error_until(_error))
                     _fallback = _code
                     # A checagem de efeitos precisa da sessão ainda viva no
                     # DB: sem ela a detecção vira conservadora (True) e o
                     # fallback para o plano pago praticamente nunca roda.
-                    _exhausted = args.mode != "plan" and (
-                        _code != "rate_limit"
-                        or _start_attempt_had_effects(args.cwd, start_ms, db_path=db_path)
+                    # Start sem cota e nada escrito: cai no plano pago nesta
+                    # mesma chamada; com efeitos, esgota para revisão.
+                    _exhausted = args.mode != "plan" and _start_attempt_had_effects(
+                        args.cwd, start_ms, db_path=db_path
                     )
                     # Exclusão adiada por _fail_attempt: agora que os efeitos
                     # já foram lidos, a sessão falha pode ser apagada.

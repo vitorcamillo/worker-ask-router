@@ -78,6 +78,8 @@ def cov_env(tmp_path, monkeypatch):
     state = tmp_path / "state"
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("WORKER_ASK_MIN_TIMEOUT", "0")
+    # Start Plan desligado por padrão: cooldown do zcode vale (ver test_quota_provider).
+    monkeypatch.setenv("ZCODE_WORKER_START_PLAN", "0")
     monkeypatch.setenv("ASK_PRESENTATION_ACTIVE", "1")
     monkeypatch.delenv("ASK_PRESENTATION_FD", raising=False)
     log = tmp_path / "calls.jsonl"

@@ -258,26 +258,41 @@ def _start_plan_state_path(state_dir: str | os.PathLike[str] | None = None) -> P
     return Path(state_dir or base.STATE) / START_PLAN_MARKER
 
 
-def _read_start_plan_blocked_until(state_dir=None) -> datetime.datetime | None:
+def _read_start_plan_marker(state_dir=None) -> tuple[datetime.datetime | None, str | None]:
+    """Lê o marcador de indisponibilidade como ``(until, reason)``.
+
+    Devolve ``(None, None)`` quando não há marcador válido. O 2º token é o
+    motivo que originou o bloqueio (ex.: "quota", "drift", "rate_limit").
+    """
+
     try:
         text = _start_plan_state_path(state_dir).read_text(encoding="utf-8")
     except OSError:
-        return None
+        return None, None
     tokens = text.split()
     if len(tokens) < 2:
-        return None
+        return None, None
     try:
         until = datetime.datetime.fromisoformat(tokens[0])
     except ValueError:
-        return None
+        return None, None
     if until.tzinfo is not None:
-        return None
+        return None, None
+    return until, tokens[1]
+
+
+def _read_start_plan_blocked_until(state_dir=None) -> datetime.datetime | None:
+    until, _ = _read_start_plan_marker(state_dir)
     return until
 
 
 def start_plan_blocked(*, now=None, state_dir=None) -> bool:
-    until = _read_start_plan_blocked_until(state_dir)
+    # Ocupado (rate_limit/refused) é transitório e não tira o Start do ar:
+    # só falta de cota ou indisponibilidade real bloqueiam o provider.
+    until, reason = _read_start_plan_marker(state_dir)
     if until is None:
+        return False
+    if reason in {"rate_limit", "refused"}:
         return False
     current = now or datetime.datetime.now()
     return current < until

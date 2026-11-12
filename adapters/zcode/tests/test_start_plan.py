@@ -72,24 +72,54 @@ def test_env_disable_and_enable(tmp_path):
 def test_provider_for_invalid_model(tmp_path):
     assert features.provider_for("invalido", now=noon(), state_dir=tmp_path / "s", environ={}) == base.PROVIDER_ID
 
-def test_block_rate_limit_last_2_minutes(tmp_path):
+def test_rate_limit_marker_never_blocks_start_plan(tmp_path):
+    # Ocupado (rate_limit) é transitório: o marcador existe (para o
+    # retryAfter), mas o Start continua sendo o provider — nunca cai no pago.
     s = tmp_path / "state"
     now = datetime.datetime(2026, 10, 15, 13, 20)
     assert features.start_plan_blocked(now=now, state_dir=s) is False
     features.mark_start_plan_unavailable("rate_limit", now=now, state_dir=s)
     marker = s / features.START_PLAN_MARKER
     assert marker.read_text(encoding="utf-8") == "2026-10-15T13:22:00 rate_limit\n"
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is True
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is False
     assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 22), state_dir=s) is False
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s, environ={}) == base.PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
 
-def test_block_refused_last_2_minutes(tmp_path):
+def test_refused_marker_never_blocks_start_plan(tmp_path):
+    # "refused" também é ocupado (sonda recusada), não falta de cota.
     s = tmp_path / "state"
     now = datetime.datetime(2026, 10, 15, 13, 20)
     features.mark_start_plan_unavailable("refused", now=now, state_dir=s)
     assert (s / features.START_PLAN_MARKER).read_text(encoding="utf-8") == "2026-10-15T13:22:00 refused\n"
-    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is True
+    assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s) is False
     assert features.start_plan_blocked(now=datetime.datetime(2026, 10, 15, 13, 22), state_dir=s) is False
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
+
+def test_busy_markers_keep_start_plan_provider(tmp_path):
+    s = tmp_path / "state"
+    now = datetime.datetime(2026, 10, 15, 13, 20)
+    for reason in ("rate_limit", "refused"):
+        features.mark_start_plan_unavailable(reason, now=now, state_dir=s)
+        assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
+
+def test_quota_marker_blocks_start_plan_until_recheck(tmp_path):
+    # Sem cota de verdade, o pago continua valendo até o marcador expirar.
+    s = tmp_path / "state"
+    now = datetime.datetime(2026, 10, 15, 13, 20)
+    features.mark_start_plan_unavailable("quota", now=now, state_dir=s)
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 49), state_dir=s, environ={}) == base.PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 50), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
+
+def test_read_start_plan_marker_returns_until_and_reason(tmp_path):
+    s = tmp_path / "state"
+    assert features._read_start_plan_marker(state_dir=s) == (None, None)
+    s.mkdir(parents=True)
+    (s / features.START_PLAN_MARKER).write_text("2026-10-15T13:22:00 rate_limit\n", encoding="utf-8")
+    assert features._read_start_plan_marker(state_dir=s) == (datetime.datetime(2026, 10, 15, 13, 22), "rate_limit")
+    assert features._read_start_plan_blocked_until(state_dir=s) == datetime.datetime(2026, 10, 15, 13, 22)
+    (s / features.START_PLAN_MARKER).write_text("malformado\n", encoding="utf-8")
+    assert features._read_start_plan_marker(state_dir=s) == (None, None)
+    assert features._read_start_plan_blocked_until(state_dir=s) is None
 
 def test_block_quota_without_until_rechecks_30_minutes(tmp_path):
     s = tmp_path / "state"
@@ -278,14 +308,18 @@ def _run_with_mocks(tmp_path, monkeypatch, *, mode, responses, provider_start=Tr
     make_selection_db(db, session="sess_1", provider=db_provider or base.PROVIDER_ID)
     monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
     if provider_start:
+        # conftest desliga o Start por padrão; aqui ele está ativo de verdade,
+        # senão start_plan_next_available ignora o marcador e retryAfter vira 1 h.
+        monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)
         monkeypatch.setattr(features, "provider_for", lambda *a, **k: features.START_PLAN_PROVIDER_ID)
     else:
         monkeypatch.setattr(features, "provider_for", lambda *a, **k: base.PROVIDER_ID)
     monkeypatch.setattr(features, "start_plan_confirmed", lambda *a, **k: True)
-    calls = {"n": 0, "deadlines": []}
+    calls = {"n": 0, "deadlines": [], "providers": []}
     def fake_execute(args, task, **kwargs):
         calls["n"] += 1
         calls["deadlines"].append(kwargs.get("total_deadline"))
+        calls["providers"].append(getattr(args, "_provider", None))
         item = responses[calls["n"] - 1]
         if isinstance(item, Exception):
             raise item
@@ -306,11 +340,15 @@ def test_fallback_plan_quota(tmp_path, monkeypatch):
     marker = Path(base.STATE) / features.START_PLAN_MARKER
     assert marker.exists()
 
-def test_fallback_plan_rate_limit_marks(tmp_path, monkeypatch):
-    ok = (0, '{"sessionId":"sess_1","response":"ok"}', "")
-    result, code, calls = _run_with_mocks(tmp_path, monkeypatch, mode="plan", responses=[features.FeatureError("r", "rate_limit"), ok])
-    assert result["startPlanFallback"] == "rate_limit"
-    assert calls["n"] == 2
+def test_plan_rate_limit_never_falls_back_to_paid(tmp_path, monkeypatch):
+    # Rate limit no Start nunca aciona a perna do plano pago: sai exit 75
+    # com retryAfter (~fim do marcador de 2 min) para o orquestrador relançar.
+    before = time.time()
+    result, code, calls = _run_with_mocks(tmp_path, monkeypatch, mode="plan", responses=[features.FeatureError("r", "rate_limit")])
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert calls["n"] == 1
+    assert calls["providers"] == [features.START_PLAN_PROVIDER_ID]
+    assert before + 60.0 <= result["retryAfter"] <= before + 300.0
     marker = Path(base.STATE) / features.START_PLAN_MARKER
     assert marker.exists()
     assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
@@ -321,6 +359,7 @@ def _run_start_rate_limit(tmp_path, monkeypatch, *, mode, timeout, start_failure
     as primeiras `start_failures` chamadas; as do plano pago respondem ok."""
     db = tmp_path / "db.sqlite"
     make_selection_db(db, session="sess_1", provider=db_provider)
+    monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)  # Start ativo (conftest desliga)
     monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
     monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
     monkeypatch.setattr(features, "provider_for", lambda *a, **k: features.START_PLAN_PROVIDER_ID)
@@ -354,26 +393,26 @@ def test_start_plan_rate_limit_recovers_on_start(tmp_path, monkeypatch):
     assert not (Path(base.STATE) / features.START_PLAN_MARKER).exists()
 
 
-def test_start_plan_rate_limit_exhausted_falls_back_paid(tmp_path, monkeypatch):
+def test_plan_rate_limit_exhausted_returns_75_without_paid(tmp_path, monkeypatch):
+    # Retry do Start esgotado em plan: exit 75 com retryAfter, sem perna paga.
+    before = time.time()
     result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="plan", timeout=600.0, start_failures=3)
-    assert code == 0 and result["status"] == "ok"
-    assert result["startPlanFallback"] == "rate_limit"
-    assert result["effective"]["providerId"] == base.PROVIDER_ID
-    assert calls["start"] == 3 and calls["paid"] == 1
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert "startPlanFallback" not in result
+    assert calls["start"] == 3 and calls["paid"] == 0
     assert sleeps == [15, 30]
+    assert before + 60.0 <= result["retryAfter"] <= before + 300.0
     marker = Path(base.STATE) / features.START_PLAN_MARKER
     assert marker.exists()
     assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
 
 
-def test_start_plan_rate_limit_deadline_goes_paid_without_sleep(tmp_path, monkeypatch):
+def test_plan_rate_limit_short_deadline_returns_75_without_paid(tmp_path, monkeypatch):
     # Prazo de 2 s menor que o primeiro atraso (15 s): não dorme, não reintenta
-    # e cai direto no plano pago.
+    # e não cai no plano pago — sai exit 75 para relançar.
     result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="plan", timeout=2.0, start_failures=3)
-    assert code == 0 and result["status"] == "ok"
-    assert result["startPlanFallback"] == "rate_limit"
-    assert result["effective"]["providerId"] == base.PROVIDER_ID
-    assert calls["start"] == 1 and calls["paid"] == 1
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert calls["start"] == 1 and calls["paid"] == 0
     assert sleeps == []
 
 
@@ -390,27 +429,30 @@ def test_write_start_plan_rate_limit_keeps_exhausted(tmp_path, monkeypatch):
     assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
 
 
-def test_write_start_plan_rate_limit_without_effects_falls_back_paid(tmp_path, monkeypatch):
-    # Start Plan ocupado sem nenhum efeito em disco: segue o mesmo caminho do
-    # modo plan e roda a perna do plano pago.
+def test_edit_start_plan_rate_limit_without_effects_returns_75(tmp_path, monkeypatch):
+    # Start Plan ocupado sem nenhum efeito em disco: relance (exit 75) com
+    # retryAfter, sem repetir a fatia no plano pago.
     monkeypatch.setattr(cli, "_start_attempt_had_effects", lambda *a, **k: False)
+    before = time.time()
     result, code, calls, sleeps = _run_start_rate_limit(tmp_path, monkeypatch, mode="edit", timeout=600.0, start_failures=3)
-    assert code == 0 and result["status"] == "ok"
-    assert result["startPlanFallback"] == "rate_limit"
-    assert result["effective"]["providerId"] == base.PROVIDER_ID
-    assert calls["start"] == 1 and calls["paid"] == 1
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert calls["start"] == 1 and calls["paid"] == 0
     assert sleeps == []
+    assert before + 60.0 <= result["retryAfter"] <= before + 300.0
+    marker = Path(base.STATE) / features.START_PLAN_MARKER
+    assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
 
 
-def test_write_start_plan_rate_limit_effects_checked_before_delete(tmp_path, monkeypatch):
+def test_edit_start_plan_rate_limit_effects_checked_before_delete(tmp_path, monkeypatch):
     # Sem dublê de _start_attempt_had_effects: a sessão falha (com sessionId
     # no stdout, só leituras) precisa ser lida pelo DB antes de ser apagada,
-    # ou a detecção vira conservadora e o plano pago nunca roda no edit.
+    # ou a detecção vira conservadora e a fatia esgota sem motivo no edit.
     db = tmp_path / "db.sqlite"
     make_selection_db(db, session="sess_1", provider=base.PROVIDER_ID)
     provider = tmp_path / "provider.json"
     write_provider(provider)
     monkeypatch.setattr(features.base, "PROVIDER_CONFIG", str(provider))
+    monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)  # Start ativo (conftest desliga)
     monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
     monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
     monkeypatch.setattr(features, "provider_for", lambda *a, **k: features.START_PLAN_PROVIDER_ID)
@@ -428,13 +470,20 @@ def test_write_start_plan_rate_limit_effects_checked_before_delete(tmp_path, mon
         calls["paid"] += 1
         return 0, '{"sessionId":"sess_1","response":"ok"}', ""
     args = cli_args(tmp_path, mode="edit", timeout=600.0)
+    before = time.time()
     result, code = cli.run_task(args, "fatia", db_path=db, runner=runner)
-    assert code == 0 and result["status"] == "ok"
-    assert result["startPlanFallback"] == "rate_limit"
-    assert result["effective"]["providerId"] == base.PROVIDER_ID
-    assert calls["start"] == 1 and calls["paid"] == 1
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert calls["start"] == 1 and calls["paid"] == 0
+    assert before + 60.0 <= result["retryAfter"] <= before + 300.0
     marker = Path(base.STATE) / features.START_PLAN_MARKER
     assert marker.read_text(encoding="utf-8").endswith(" rate_limit\n")
+    # A sessão falha foi lida (sem efeitos) e só então apagada.
+    connection = sqlite3.connect(db)
+    try:
+        gone = connection.execute("select id from session where id='sess_w'").fetchall()
+    finally:
+        connection.close()
+    assert gone == []
 
 
 def test_classify_start_busy_is_rate_limit():
@@ -660,15 +709,19 @@ def test_probe_edit_ok_keeps_start_plan(tmp_path, monkeypatch):
     assert "startPlanFallback" not in result
     assert (Path(base.STATE) / features.START_PLAN_OK_MARKER).exists()
 
-def test_probe_edit_rate_limit_falls_back_probe(tmp_path, monkeypatch):
+def test_probe_edit_rate_limit_returns_75_without_paid(tmp_path, monkeypatch):
+    # Sonda recusada por rate limit: marca "refused", sai exit 75 com
+    # retryAfter e a perna principal (paga ou não) nunca roda.
+    monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)  # Start ativo (conftest desliga)
+    before = time.time()
     result, code, probe_calls, main_calls = _run_probe_integration(
         tmp_path, monkeypatch,
         probe_side=features.FeatureError("r", "rate_limit"),
         main_ok_provider=base.PROVIDER_ID,
     )
-    assert code == 0 and result["startPlanFallback"] == "probe"
-    assert result["effective"]["providerId"] == base.PROVIDER_ID
-    assert result["requested"]["providerId"] == base.PROVIDER_ID
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert probe_calls["n"] == 1 and main_calls["n"] == 0
+    assert before + 60.0 <= result["retryAfter"] <= before + 300.0
     marker = (Path(base.STATE) / features.START_PLAN_MARKER).read_text(encoding="utf-8")
     assert marker.endswith(" refused\n")
 
@@ -771,10 +824,10 @@ def test_resume_start_plan_after_block_rejects_before_run(tmp_path, monkeypatch)
     make_resume_db(db, session="sess_resume", cwd=str(tmp_path), provider=features.START_PLAN_PROVIDER_ID)
     state = tmp_path / "state"
     monkeypatch.setattr(cli.base, "STATE", str(state))
-    # Marcador de bloqueio ativo (rate_limit/quota) faz provider_for resolver
-    # para o pago em qualquer horário.
+    # Marcador de bloqueio ativo (quota) faz provider_for resolver para o
+    # pago em qualquer horário; rate_limit/refused nunca bloqueiam.
     state.mkdir(parents=True)
-    (state / features.START_PLAN_MARKER).write_text("2099-01-01T00:00:00 rate_limit\n", encoding="utf-8")
+    (state / features.START_PLAN_MARKER).write_text("2099-01-01T00:00:00 quota\n", encoding="utf-8")
     assert features.provider_for("glm-5.3-flash") == base.PROVIDER_ID
     def boom_runner(*_args, **_kwargs):
         pytest.fail("CLI não deveria rodar com seleção divergente")
@@ -855,8 +908,10 @@ def test_next_available_uses_current_time_and_real_environ(tmp_path, monkeypatch
 def test_blocked_without_explicit_now_uses_current_time(tmp_path):
     s = tmp_path / "state"
     s.mkdir(parents=True)
-    (s / features.START_PLAN_MARKER).write_text("2099-01-01T00:00:00 rate_limit\n", encoding="utf-8")
+    (s / features.START_PLAN_MARKER).write_text("2099-01-01T00:00:00 quota\n", encoding="utf-8")
     assert features.start_plan_blocked(state_dir=s) is True
+    (s / features.START_PLAN_MARKER).write_text("2099-01-01T00:00:00 rate_limit\n", encoding="utf-8")
+    assert features.start_plan_blocked(state_dir=s) is False
 
 
 def test_quota_retry_after_prefers_start_plan_eta(monkeypatch, tmp_path):
@@ -1015,3 +1070,45 @@ def test_classify_quota_fills_reset_at(tmp_path, monkeypatch):
     error = cli._classify_process_failure(1, "quota exceeded")
     assert error.code == "quota"
     assert error.reset_at is None
+
+
+def _run_edit_start_quota(tmp_path, monkeypatch, tools):
+    # Start sem cota (quota) em edit com sessão real no DB: os efeitos são lidos
+    # antes de apagar a sessão; sem escrita cai no pago, com escrita esgota.
+    db = tmp_path / "db.sqlite"
+    make_selection_db(db, session="sess_1", provider=base.PROVIDER_ID)
+    provider = tmp_path / "provider.json"
+    write_provider(provider)
+    monkeypatch.setattr(features.base, "PROVIDER_CONFIG", str(provider))
+    monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)
+    monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
+    monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
+    monkeypatch.setattr(features, "provider_for", lambda *a, **k: features.START_PLAN_PROVIDER_ID)
+    monkeypatch.setattr(features, "start_plan_confirmed", lambda *a, **k: True)
+    calls = {"start": 0, "paid": 0}
+    def runner(command, env, deadline, limit):
+        if env.get("ZCODE_WORKER_START_PLAN_PATCHES") == "1":
+            calls["start"] += 1
+            make_start_busy_db(db, directory=str(tmp_path), time_created=int(time.time() * 1000), tools=tools)
+            return 1, '{"sessionId":"sess_w","response":""}', "quota exceeded"
+        calls["paid"] += 1
+        return 0, '{"sessionId":"sess_1","response":"ok"}', ""
+    args = cli_args(tmp_path, mode="edit", timeout=600.0)
+    result, code = cli.run_task(args, "fatia", db_path=db, runner=runner)
+    return result, code, calls
+
+
+def test_edit_start_quota_without_effects_falls_back_to_paid(tmp_path, monkeypatch):
+    result, code, calls = _run_edit_start_quota(tmp_path, monkeypatch, tools=(("Read", 1),))
+    assert code == 0 and result["status"] == "ok"
+    assert result["startPlanFallback"] == "quota"
+    assert result["effective"]["providerId"] == base.PROVIDER_ID
+    assert calls == {"start": 1, "paid": 1}
+    marker = Path(base.STATE) / features.START_PLAN_MARKER
+    assert marker.read_text(encoding="utf-8").split()[1] == "quota"
+
+
+def test_edit_start_quota_with_effects_is_exhausted(tmp_path, monkeypatch):
+    result, code, calls = _run_edit_start_quota(tmp_path, monkeypatch, tools=(("Write", 0),))
+    assert code == 1 and result["error"]["code"] == "start_plan_exhausted"
+    assert calls == {"start": 1, "paid": 0}
