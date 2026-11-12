@@ -513,7 +513,8 @@ def _stats_summary():
             runs += 1
             key = rec.get("executor")
             key = key if isinstance(key, str) and key else "null"
-            slot = by_exec.setdefault(key, {"runs": 0, "rc": {}, "result": {}, "_durations": []})
+            slot = by_exec.setdefault(key, {"runs": 0, "rc": {}, "result": {}, "_durations": [],
+                                             "out_of_scope_runs": 0, "scope_checked_runs": 0})
             slot["runs"] += 1
             rc = rec.get("rc")
             rc_key = str(rc) if isinstance(rc, int) and not isinstance(rc, bool) else "null"
@@ -524,6 +525,11 @@ def _stats_summary():
             duration = rec.get("duration_s")
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 slot["_durations"].append(duration)
+            fora = rec.get("out_of_scope")
+            if isinstance(fora, int) and not isinstance(fora, bool) and fora >= 0:
+                slot["scope_checked_runs"] += 1
+                if fora > 0:
+                    slot["out_of_scope_runs"] += 1
             task_id = rec.get("task_id")
             if isinstance(task_id, str) and task_id and result != "blocked_question":
                 task_counts[task_id] = task_counts.get(task_id, 0) + 1
@@ -532,13 +538,18 @@ def _stats_summary():
         durations = slot.pop("_durations")
         slot["avg_duration_s"] = round(sum(durations) / len(durations), 3) if durations else 0.0
         by_executor[key] = slot
-    return {
+    total_fora = sum(slot.get("out_of_scope_runs", 0) for slot in by_exec.values())
+    resumo = {
         "runs": runs,
         "redo": redo,
         "by_executor": by_executor,
         "tasks_relaunched": sum(1 for n in task_counts.values() if n > 1),
         "tasks_over_budget": sum(1 for n in task_counts.values() if n >= MAX_RUNS_PER_TASK),
     }
+    if runs > 0:
+        # Resumo vazio mantém o formato legado.
+        resumo["out_of_scope_runs"] = total_fora
+    return resumo
 
 
 def _valid_until(value, now):
@@ -938,6 +949,149 @@ def snapshot_allowed(cwd, allowed):
     for rel in allowed:
         out[rel] = _snapshot_one(cwd, rel)
     return out
+
+
+# Limites da impressão da árvore suja (leitura barata, nunca trava o roteador).
+_ARVORE_MAX_CAMINHOS = 5000
+_ARVORE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _tree_fingerprint(cwd):
+    """Impressão dos caminhos sujos do git; None quando não dá para avaliar.
+
+    Leitura pura: nunca levanta, nunca segue symlink, nunca muda rc/stdout.
+    Chave do dict: caminho ABSOLUTO normalizado; valor: sha256 do conteúdo,
+    "big:<size>:<mtime_ns>", "symlink:<alvo>", "missing", "other" ou "err".
+    """
+    try:
+        env = dict(os.environ)
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        proc_topo = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                                   capture_output=True, timeout=15, env=env)
+        if proc_topo.returncode != 0:
+            return None
+        raiz = proc_topo.stdout.decode("utf-8", "replace").strip()
+        if not raiz:
+            return None
+        # Status roda no toplevel para os caminhos virem relativos a ele.
+        proc_estado = subprocess.run(["git", "-C", raiz, "status", "--porcelain=v1",
+                                      "-z", "--untracked-files=all"],
+                                     capture_output=True, timeout=15, env=env)
+        if proc_estado.returncode != 0:
+            return None
+        # Cada registro é `XY<espaço>caminho\0`; rename/cópia traz a origem no próximo token.
+        rels = []
+        tokens = proc_estado.stdout.split(b"\x00")
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            i += 1
+            if not tok or len(tok) < 4 or tok[2:3] != b" ":
+                continue
+            rels.append(tok[3:])
+            if tok[0:1] in (b"R", b"C") or tok[1:2] in (b"R", b"C"):
+                if i < len(tokens) and tokens[i]:
+                    rels.append(tokens[i])
+                i += 1
+        if len(rels) > _ARVORE_MAX_CAMINHOS:
+            return None
+        saida = {}
+        for rel in rels:
+            cheio = os.path.normpath(os.path.join(raiz, os.fsdecode(rel)))
+            try:
+                info = os.lstat(cheio)
+            except (FileNotFoundError, NotADirectoryError):
+                saida[cheio] = "missing"
+                continue
+            except OSError:
+                saida[cheio] = "err"
+                continue
+            try:
+                if statmod.S_ISLNK(info.st_mode):
+                    try:
+                        alvo = os.readlink(cheio)
+                    except OSError:
+                        saida[cheio] = "err"
+                    else:
+                        saida[cheio] = "symlink:" + alvo
+                elif statmod.S_ISREG(info.st_mode):
+                    if info.st_size > _ARVORE_MAX_BYTES:
+                        saida[cheio] = "big:%d:%d" % (info.st_size, info.st_mtime_ns)
+                    else:
+                        try:
+                            fd = os.open(cheio, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                        except OSError:
+                            saida[cheio] = "err"
+                        else:
+                            try:
+                                if not statmod.S_ISREG(os.fstat(fd).st_mode):
+                                    saida[cheio] = "err"
+                                else:
+                                    h = hashlib.sha256()
+                                    total = 0
+                                    cabe = True
+                                    while True:
+                                        bloco = os.read(fd, 65536)
+                                        if not bloco:
+                                            break
+                                        total += len(bloco)
+                                        if total > _ARVORE_MAX_BYTES:
+                                            cabe = False
+                                            break
+                                        h.update(bloco)
+                                    if cabe:
+                                        saida[cheio] = h.hexdigest()
+                                    else:
+                                        saida[cheio] = "big:%d:%d" % (info.st_size, info.st_mtime_ns)
+                            except OSError:
+                                saida[cheio] = "err"
+                            finally:
+                                try:
+                                    os.close(fd)
+                                except OSError:
+                                    pass
+                else:
+                    saida[cheio] = "other"
+            except OSError:
+                saida[cheio] = "err"
+        return saida
+    except Exception:
+        return None
+
+
+def _out_of_scope(before, after, cwd, allowed):
+    """Caminhos alterados fora dos --allowed-file, relativos ao cwd (máx. 50).
+
+    None se alguma impressão for None (sem condição de comparar). Caminhos
+    autorizados saem da lista; ausência de um lado conta como diferença.
+    """
+    if before is None or after is None:
+        return None
+    try:
+        base = os.path.realpath(cwd)
+        autorizados = set()
+        for rel in (allowed or []):
+            try:
+                autorizados.add(os.path.normpath(os.path.join(base, rel)))
+            except Exception:
+                continue
+        fora = []
+        for caminho in set(before) | set(after):
+            if before.get(caminho) != after.get(caminho):
+                try:
+                    real = os.path.realpath(caminho)
+                except Exception:
+                    real = caminho
+                if os.path.normpath(caminho) in autorizados or real in autorizados:
+                    continue
+                try:
+                    fora.append(os.path.relpath(caminho, cwd))
+                except Exception:
+                    continue
+        fora.sort()
+        return fora[:50]
+    except Exception:
+        return None
 
 
 def _kill_group(proc, sig):
@@ -1370,6 +1524,12 @@ def _main_impl(argv=None):
                 _err("erro: snapshot falhou")
                 sys.exit(1)
 
+        # Impressão da árvore suja para detectar edição fora do escopo (plan e write).
+        try:
+            tree_before = _tree_fingerprint(cwd)
+        except Exception:
+            tree_before = None
+
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
@@ -1393,6 +1553,21 @@ def _main_impl(argv=None):
         # Coleta unica por tentativa, antes de ramificar: interrupcao (rc143/144)
         # apos fallback nao pode herdar executor/tokens da tentativa anterior.
         _record_run_metrics(name, stdout_data, allowed, cwd, snap_before)
+
+        # Detecção fora do escopo: métrica e aviso; nunca muda rc, stdout ou fluxo.
+        try:
+            if _RUN is not None:
+                oos = _out_of_scope(tree_before, _tree_fingerprint(cwd), cwd, allowed)
+                _RUN["out_of_scope"] = len(oos) if oos is not None else None
+                _RUN["out_of_scope_files"] = oos[:20] if oos else []
+                if oos:
+                    nomes = ", ".join(oos[:10])
+                    if args.mode == "plan":
+                        _err(f"aviso: {name} alterou {len(oos)} arquivo(s) em modo plan (só leitura): {nomes} (pode incluir edição concorrente)")
+                    else:
+                        _err(f"aviso: {name} alterou {len(oos)} arquivo(s) fora do escopo (--allowed-file): {nomes} (pode incluir edição concorrente)")
+        except Exception:
+            pass
 
         if timed_out or rc == 124:
             # Circuito aberto: nao repetir automaticamente um executor sem resposta.
