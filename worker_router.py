@@ -525,11 +525,31 @@ def _stats_summary():
             duration = rec.get("duration_s")
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 slot["_durations"].append(duration)
-            fora = rec.get("out_of_scope")
-            if isinstance(fora, int) and not isinstance(fora, bool) and fora >= 0:
-                slot["scope_checked_runs"] += 1
-                if fora > 0:
-                    slot["out_of_scope_runs"] += 1
+            tentativas = rec.get("out_of_scope_attempts")
+            por_tentativa = (
+                [t for t in tentativas if isinstance(t, dict) and "out_of_scope" in t]
+                if isinstance(tentativas, list)
+                else []
+            )
+            if por_tentativa:
+                # Autoria por tentativa: fallback não apaga nem transfere a
+                # violação de um executor para o executor final do run.
+                for tentativa in por_tentativa:
+                    nome = tentativa.get("executor")
+                    nome = nome if isinstance(nome, str) and nome else "null"
+                    alvo = by_exec.setdefault(nome, {"runs": 0, "rc": {}, "result": {}, "_durations": [],
+                                                     "out_of_scope_runs": 0, "scope_checked_runs": 0})
+                    fora_t = tentativa.get("out_of_scope")
+                    if isinstance(fora_t, int) and not isinstance(fora_t, bool) and fora_t >= 0:
+                        alvo["scope_checked_runs"] += 1
+                        if fora_t > 0:
+                            alvo["out_of_scope_runs"] += 1
+            else:
+                fora = rec.get("out_of_scope")
+                if isinstance(fora, int) and not isinstance(fora, bool) and fora >= 0:
+                    slot["scope_checked_runs"] += 1
+                    if fora > 0:
+                        slot["out_of_scope_runs"] += 1
             task_id = rec.get("task_id")
             if isinstance(task_id, str) and task_id and result != "blocked_question":
                 task_counts[task_id] = task_counts.get(task_id, 0) + 1
@@ -1059,11 +1079,12 @@ def _tree_fingerprint(cwd):
         return None
 
 
-def _out_of_scope(before, after, cwd, allowed):
-    """Caminhos alterados fora dos --allowed-file, relativos ao cwd (máx. 50).
+def _out_of_scope_detail(before, after, cwd, allowed):
+    """(total, caminhos[:50]) alterados fora dos --allowed-file, relativos ao cwd.
 
-    None se alguma impressão for None (sem condição de comparar). Caminhos
-    autorizados saem da lista; ausência de um lado conta como diferença.
+    O total é contado antes do truncamento da lista. None se alguma
+    impressão for None (sem condição de comparar). Caminhos autorizados
+    saem da lista; ausência de um lado conta como diferença.
     """
     if before is None or after is None:
         return None
@@ -1089,9 +1110,15 @@ def _out_of_scope(before, after, cwd, allowed):
                 except Exception:
                     continue
         fora.sort()
-        return fora[:50]
+        return len(fora), fora[:50]
     except Exception:
         return None
+
+
+def _out_of_scope(before, after, cwd, allowed):
+    """Caminhos alterados fora dos --allowed-file (máx. 50); ver _out_of_scope_detail."""
+    detail = _out_of_scope_detail(before, after, cwd, allowed)
+    return detail[1] if detail is not None else None
 
 
 def _kill_group(proc, sig):
@@ -1563,15 +1590,37 @@ def _main_impl(argv=None):
         # Detecção fora do escopo: métrica e aviso; nunca muda rc, stdout ou fluxo.
         try:
             if _RUN is not None:
-                oos = _out_of_scope(tree_before, _tree_fingerprint(cwd), cwd, allowed)
-                _RUN["out_of_scope"] = len(oos) if oos is not None else None
-                _RUN["out_of_scope_files"] = oos[:20] if oos else []
-                if oos:
+                detail = _out_of_scope_detail(tree_before, _tree_fingerprint(cwd), cwd, allowed)
+                oos_total = detail[0] if detail is not None else None
+                oos = detail[1] if detail is not None else None
+                # Persiste por tentativa e agrega: fallback limpo não apaga
+                # violação (nem autoria) de tentativa anterior.
+                tentativas_oos = _RUN.setdefault("out_of_scope_attempts", [])
+                if not isinstance(tentativas_oos, list):
+                    tentativas_oos = _RUN["out_of_scope_attempts"] = []
+                tentativas_oos.append({
+                    "executor": name,
+                    "out_of_scope": oos_total,
+                    "out_of_scope_files": oos[:20] if oos else [],
+                })
+                conhecidos = [t["out_of_scope"] for t in tentativas_oos
+                              if isinstance(t, dict)
+                              and isinstance(t.get("out_of_scope"), int)
+                              and not isinstance(t.get("out_of_scope"), bool)]
+                _RUN["out_of_scope"] = sum(conhecidos) if conhecidos else None
+                arquivos = []
+                for tentativa in tentativas_oos:
+                    if isinstance(tentativa, dict):
+                        for arquivo in tentativa.get("out_of_scope_files") or []:
+                            if arquivo not in arquivos:
+                                arquivos.append(arquivo)
+                _RUN["out_of_scope_files"] = arquivos[:20]
+                if oos_total:
                     nomes = ", ".join(oos[:10])
                     if args.mode == "plan":
-                        _err(f"aviso: {name} alterou {len(oos)} arquivo(s) em modo plan (só leitura): {nomes} (pode incluir edição concorrente)")
+                        _err(f"aviso: {name} alterou {oos_total} arquivo(s) em modo plan (só leitura): {nomes} (pode incluir edição concorrente)")
                     else:
-                        _err(f"aviso: {name} alterou {len(oos)} arquivo(s) fora do escopo (--allowed-file): {nomes} (pode incluir edição concorrente)")
+                        _err(f"aviso: {name} alterou {oos_total} arquivo(s) fora do escopo (--allowed-file): {nomes} (pode incluir edição concorrente)")
         except Exception:
             pass
 

@@ -27,12 +27,13 @@ def install_source(home, body):
     return path
 
 
-def block_start(home, until_epoch):
+def block_start(home, until_epoch, reason="quota"):
     d = home / ".local/state/zcode-worker"
     d.mkdir(parents=True, exist_ok=True)
     (d / "start-plan-unavailable").write_text(
         datetime.datetime.fromtimestamp(until_epoch).isoformat(timespec="seconds")
-        + " quota"
+        + " "
+        + reason
     )
 
 
@@ -217,3 +218,36 @@ def test_cached_zcode_cooldown_vs_start_plan(fake_env, monkeypatch, start_blocke
     assert _first_called(fake_env) == expected
     if expected == "zcode-worker":
         assert "zcode-worker" not in w.load_cache()
+
+
+@pytest.mark.parametrize("reason", ["rate_limit", "refused"])
+def test_start_busy_marker_does_not_block_or_consult_paid(home, reason):
+    now = time.time()
+    install_source(
+        home, "return " + repr({"janelas": [{"pct": 100, "reset": now + 7 * 86400}]})
+    )
+    block_start(home, now + 3600, reason)
+    assert p.start_plan_free(now) is True
+    assert p.query_reset("zcode-worker", now) is None
+
+
+@pytest.mark.parametrize("reason", ["rate_limit", "refused"])
+def test_preflight_runs_zcode_with_busy_marker(fake_env, monkeypatch, reason):
+    monkeypatch.delenv("ZCODE_WORKER_CONTEXT_STATE", raising=False)
+    monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)
+    until = time.time() + 86400
+    install_source(
+        fake_env["tmp"], "return " + repr({"janelas": [{"pct": 100, "reset": until}]})
+    )
+    block_start(fake_env["tmp"], time.time() + 3600, reason)
+    assert _first_called(fake_env) == "zcode-worker"
+
+
+@pytest.mark.parametrize("reason", ["rate_limit", "refused"])
+def test_cached_cooldown_ignored_with_busy_marker(fake_env, monkeypatch, reason):
+    monkeypatch.delenv("ZCODE_WORKER_CONTEXT_STATE", raising=False)
+    monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)
+    block_start(fake_env["tmp"], time.time() + 3600, reason)
+    w = _stale_zcode_entry()
+    assert _first_called(fake_env) == "zcode-worker"
+    assert "zcode-worker" not in w.load_cache()

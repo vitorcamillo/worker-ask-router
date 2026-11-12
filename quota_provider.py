@@ -57,7 +57,12 @@ def _start_plan_until(now):
     )
     try:
         text = (Path(state) / "start-plan-unavailable").read_text()
-        until = datetime.datetime.fromisoformat(text.split()[0])
+        tokens = text.split()
+        until = datetime.datetime.fromisoformat(tokens[0])
+        # Ocupado (rate_limit/refused) é transitório e não bloqueia o Start,
+        # como em start_plan_blocked do adapter.
+        if len(tokens) > 1 and tokens[1] in {"rate_limit", "refused"}:
+            return None
         if until.tzinfo is not None:
             return None
         ts = until.timestamp()
