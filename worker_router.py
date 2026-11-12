@@ -502,6 +502,7 @@ def _stats_summary():
     """Resumo do runs log; log ausente ou ilegivel vira contagem zero."""
     runs = 0
     redo = 0
+    total_fora = 0
     by_exec = {}
     task_counts = {}
     for name in _RUN_LOG_FILES:
@@ -511,6 +512,7 @@ def _stats_summary():
                     redo += 1
                 continue
             runs += 1
+            run_fora = False
             key = rec.get("executor")
             key = key if isinstance(key, str) and key else "null"
             slot = by_exec.setdefault(key, {"runs": 0, "rc": {}, "result": {}, "_durations": [],
@@ -544,12 +546,16 @@ def _stats_summary():
                         alvo["scope_checked_runs"] += 1
                         if fora_t > 0:
                             alvo["out_of_scope_runs"] += 1
+                            run_fora = True
             else:
                 fora = rec.get("out_of_scope")
                 if isinstance(fora, int) and not isinstance(fora, bool) and fora >= 0:
                     slot["scope_checked_runs"] += 1
                     if fora > 0:
                         slot["out_of_scope_runs"] += 1
+                        run_fora = True
+            if run_fora:
+                total_fora += 1
             task_id = rec.get("task_id")
             if isinstance(task_id, str) and task_id and result != "blocked_question":
                 task_counts[task_id] = task_counts.get(task_id, 0) + 1
@@ -558,7 +564,6 @@ def _stats_summary():
         durations = slot.pop("_durations")
         slot["avg_duration_s"] = round(sum(durations) / len(durations), 3) if durations else 0.0
         by_executor[key] = slot
-    total_fora = sum(slot.get("out_of_scope_runs", 0) for slot in by_exec.values())
     resumo = {
         "runs": runs,
         "redo": redo,

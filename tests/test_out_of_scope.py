@@ -189,6 +189,31 @@ def test_stats_summary_atribui_out_of_scope_por_tentativa(monkeypatch, tmp_path)
     assert res["by_executor"]["muse-ask"]["scope_checked_runs"] == 1
 
 
+def test_stats_summary_duas_tentativas_infratoras_contam_um_run_global(monkeypatch, tmp_path):
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    sd = state / "worker-ask"
+    sd.mkdir(parents=True)
+    agora = "2026-01-01T00:00:00+00:00"
+    rec = {"schema": 1, "run_id": "%032x" % 1, "ts": agora, "orchestrator": "codex",
+           "mode": "write", "cwd": "/tmp/x", "allowed_files": ["a.txt"], "attempts": [],
+           "rc": 0, "duration_s": 1.0, "executor": "muse-ask", "output_bytes": 5,
+           "changed_files": 0, "task_id": "t1", "result": "completed",
+           "out_of_scope": 3, "out_of_scope_files": ["fora.txt", "fora2.txt"],
+           "out_of_scope_attempts": [
+               {"executor": "zcode-worker", "out_of_scope": 1, "out_of_scope_files": ["fora.txt"]},
+               {"executor": "muse-ask", "out_of_scope": 2, "out_of_scope_files": ["fora2.txt"]},
+           ]}
+    (sd / "runs.jsonl").write_text(json.dumps(rec) + "\n", encoding="utf-8")
+    res = wr._stats_summary()
+    assert res["runs"] == 1
+    assert res["out_of_scope_runs"] == 1
+    assert res["by_executor"]["zcode-worker"]["out_of_scope_runs"] == 1
+    assert res["by_executor"]["zcode-worker"]["scope_checked_runs"] == 1
+    assert res["by_executor"]["muse-ask"]["out_of_scope_runs"] == 1
+    assert res["by_executor"]["muse-ask"]["scope_checked_runs"] == 1
+
+
 @pytest.mark.parametrize("modo", ["write", "plan"])
 def test_e2e_router_avisa_e_registra_fora_do_escopo(repo, tmp_path, modo):
     bin_dir = tmp_path / "bin"
