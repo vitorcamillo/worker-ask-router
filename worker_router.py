@@ -1100,6 +1100,38 @@ def _tree_fingerprint(cwd):
         return None
 
 
+def _ignored_fingerprint(cwd):
+    """Conjunto de caminhos ignorados pelo git; None quando não dá para avaliar.
+
+    O status comum (base de _tree_fingerprint) não lista ignorados: arquivo
+    criado em caminho ignorado no slot ficaria invisível à comparação de estado.
+    Leitura pura: nunca levanta; `--ignored=matching` mostra quem casa com
+    padrão (diretório inteiro, sem descer no conteúdo).
+    """
+    try:
+        env = dict(os.environ)
+        env["GIT_OPTIONAL_LOCKS"] = "0"
+        proc_topo = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+                                   capture_output=True, timeout=15, env=env)
+        if proc_topo.returncode != 0:
+            return None
+        raiz = proc_topo.stdout.decode("utf-8", "replace").strip()
+        if not raiz:
+            return None
+        proc_ign = subprocess.run(["git", "-C", raiz, "status", "--porcelain=v1", "-z",
+                                   "--untracked-files=all", "--ignored=matching"],
+                                  capture_output=True, timeout=15, env=env)
+        if proc_ign.returncode != 0:
+            return None
+        rels = [os.fsdecode(tok[3:]) for tok in proc_ign.stdout.split(b"\x00")
+                if tok.startswith(b"!! ")]
+        if len(rels) > _ARVORE_MAX_CAMINHOS:
+            return None
+        return {os.path.normpath(os.path.join(raiz, rel)) for rel in rels}
+    except Exception:
+        return None
+
+
 def _out_of_scope_detail(before, after, cwd, allowed):
     """(total, caminhos[:50]) alterados fora dos --allowed-file, relativos ao cwd.
 
@@ -1391,7 +1423,9 @@ def _iso_begin(cwd_arg, allowed, prompt_bytes):
     except Exception:
         fp_before = None
     return {"prep": prep, "cwd": session.slot_cwd, "prompt": texto,
-            "fp_before": fp_before, "fp_after": None, "sync": None}
+            "fp_before": fp_before, "fp_after": None,
+            "ign_before": _ignored_fingerprint(session.slot_cwd), "ign_after": None,
+            "sync": None}
 
 
 def _iso_end(attempt, allowed):
@@ -1462,6 +1496,10 @@ def _iso_no_effect(attempt, name, mode, cwd, allowed, snap_before, marker, deadl
     if attempt["prep"].links:
         # Links de dependência apontam para caminhos ignorados pelo git na árvore real:
         # fora da impressão do status, não há como provar a integridade; fallback negado.
+        return False
+    if attempt["ign_before"] is None or attempt["ign_before"] != attempt["ign_after"]:
+        # Ignorados criados no slot também ficam fora da impressão do status:
+        # sem a conferência dedicada, integridade da cópia não comprovada; negado.
         return False
     try:
         if snapshot_allowed(attempt["cwd"], allowed) != attempt["prep"].snap_slot_before:
@@ -1885,6 +1923,7 @@ def _main_impl(argv=None):
             if _RUN is not None:
                 if attempt is not None:
                     attempt["fp_after"] = _tree_fingerprint(exec_cwd)
+                    attempt["ign_after"] = _ignored_fingerprint(exec_cwd)
                     detail = _out_of_scope_detail(attempt["fp_before"], attempt["fp_after"], exec_cwd, allowed)
                 else:
                     detail = _out_of_scope_detail(tree_before, _tree_fingerprint(cwd), cwd, allowed)
