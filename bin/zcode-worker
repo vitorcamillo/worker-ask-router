@@ -304,6 +304,44 @@ def count_active_cli_processes(proc_root=None, uid=None):
     return sum(parent not in processes or group != processes[parent][1] for parent, group in processes.values())
 
 
+def active_cli_pids(proc_root=None, uid=None):
+    """Pids dos CLIs principais da mesma contagem de count_active_cli_processes.
+
+    A sonda de vagas do roteador correlaciona esses pids com as reservas para
+    não contar duas vezes uma execução que já está visível.
+    """
+    root = proc_root or PROC_ROOT
+    if not os.path.isabs(root):
+        raise AdmissionError("fonte de processos deve usar caminho absoluto")
+    owner_uid = os.getuid() if uid is None else uid
+    processes = {}
+    try:
+        entries = os.scandir(root)
+    except OSError:
+        raise AdmissionError("não foi possível inspecionar processos para admissão") from None
+    with entries:
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            proc_dir = entry.path
+            try:
+                if os.stat(proc_dir).st_uid != owner_uid:
+                    continue
+                with open(os.path.join(proc_dir, "comm"), encoding="utf-8", errors="replace") as comm:
+                    if comm.read().strip() != "zcode-cli":
+                        continue
+                if _proc_cmdline_has_prompt(os.path.join(proc_dir, "cmdline")):
+                    with open(os.path.join(proc_dir, "stat"), encoding="utf-8") as process:
+                        identity = process.read().rsplit(")", 1)[1].split()
+                        processes[int(entry.name)] = (int(identity[1]), int(identity[2]))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (PermissionError, OSError, UnicodeError, ValueError, IndexError):
+                raise AdmissionError("não foi possível listar os pids para admissão") from None
+    return sorted(pid for pid, (parent, group) in processes.items()
+                  if parent not in processes or group != processes[parent][1])
+
+
 def _try_lock(fd):
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

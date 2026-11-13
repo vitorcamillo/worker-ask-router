@@ -132,3 +132,15 @@ def test_real_worker_count_still_reaches_limit(counter, tmp_path):
     assert counter.count_active_cli_processes(str(tmp_path)) == 4
     process(tmp_path, 500, 1, 500)
     assert counter.count_active_cli_processes(str(tmp_path)) == 5
+
+
+def test_active_cli_pids_lists_the_counted_leaders(counter, tmp_path):
+    # Mesma deduplicação da contagem: só os líderes, na ordem crescente.
+    process(tmp_path, 100, 1, 100)
+    for pid in range(101, 105):
+        process(tmp_path, pid, 100, 100)
+    process(tmp_path, 200, 1, 200)
+    process(tmp_path, 201, 200, 200)
+    pids = counter.active_cli_pids(str(tmp_path))
+    assert pids == [100, 200]
+    assert counter.count_active_cli_processes(str(tmp_path)) == len(pids)

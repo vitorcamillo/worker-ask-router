@@ -210,8 +210,12 @@ def reserve(name, state_dir):
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 # Reserva recente ainda fora da sonda: soma à ocupação real.
-                feita = _numero_txt(os.pread(fd, 32, 0))
-                pendentes += feita is None or agora - feita < RESERVA_PENDENTE
+                # A execução da própria reserva já sondada não soma duas vezes.
+                feita, dono = _carimbo(os.pread(fd, 64, 0))
+                pendentes += (
+                    feita is None
+                    or (agora - feita < RESERVA_PENDENTE and not _execucao_sondada(probe, dono))
+                )
                 os.close(fd)
                 continue
             livre = fd if livre is None else (os.close(fd) or livre)
@@ -219,7 +223,7 @@ def reserve(name, state_dir):
             release(livre)
             return False
         os.ftruncate(livre, 0)
-        os.pwrite(livre, repr(agora).encode(), 0)
+        os.pwrite(livre, f"{agora!r} {os.getpid()}".encode(), 0)
         return livre
     except Exception:
         return None
@@ -230,11 +234,47 @@ def reserve(name, state_dir):
 RESERVA_PENDENTE = 15.0  # s até o worker reservado aparecer na sonda de vagas
 
 
-def _numero_txt(raw):
+def _carimbo(raw):
+    """(epoch, pid) gravados na reserva; ilegível devolve (None, None)."""
     try:
-        return float(raw.decode())
-    except (ValueError, UnicodeError):
-        return None
+        partes = raw.decode().split()
+    except UnicodeError:
+        return None, None
+    try:
+        epoch = float(partes[0])
+    except (IndexError, ValueError):
+        return None, None
+    try:
+        pid = int(partes[1])
+    except (IndexError, ValueError):
+        pid = None
+    return (epoch if _numero(epoch) else None), pid
+
+
+def _execucao_sondada(probe, dono):
+    """True quando a execução reservada por dono já está entre os pids da sonda."""
+    pids = probe.get("pids") if isinstance(probe, dict) else None
+    if dono is None or not isinstance(pids, (list, tuple, set, frozenset)):
+        return False  # sem correlação possível: a reserva continua pendente
+    return any(_descende_de(pid, dono) for pid in pids)
+
+
+def _descende_de(pid, raiz):
+    """True se pid tem raiz como ancestral pelo /proc; erro de leitura é False."""
+    atual = pid
+    for _ in range(64):  # teto de hops protege de árvore ciclica
+        if not isinstance(atual, int) or isinstance(atual, bool) or atual <= 1:
+            return False
+        try:
+            with open(f"/proc/{atual}/stat", "rb") as fh:
+                campos = fh.read().rsplit(b")", 1)[1].split()
+            ppid = int(campos[1])
+        except (OSError, ValueError, IndexError):
+            return False
+        if ppid == raiz:
+            return True
+        atual = ppid
+    return False
 
 
 def release(reserva):
@@ -255,13 +295,15 @@ def _slots_zcode():
                 sys.path.insert(0, adapter)
             import zcode_worker.base as base
         max_parallel = int(base._read_settings())
-        active = int(base.count_active_cli_processes())
+        pids = base.active_cli_pids()
+        active = len(pids)
         mem_ok = base._read_mem_available_bytes() >= base.MIN_MEM_AVAILABLE
         return {
             "active": active,
             "max": max_parallel,
             "mem_ok": mem_ok,
             "free": mem_ok and active < max_parallel,
+            "pids": pids,
         }
     except Exception:
         return None
@@ -282,34 +324,51 @@ def _slots_opencode():
         base_dir = os.environ.get("WORKER_ASK_OPENCODE_VAGA_DIR") or "/tmp"
         uid = os.getuid()
         busy = 0
+        pids = []
         for i in range(1, max_slots + 1):
             path = os.path.join(base_dir, f"opencode-ask-{uid}.vaga{i}")
-            if not _vaga_ocupada(path):
+            ocupada, dono = _vaga_estado(path)
+            if not ocupada:
                 continue
             busy += 1
-        return {"active": busy, "max": max_slots, "free": busy < max_slots}
+            if dono is not None:
+                pids.append(dono)
+        return {"active": busy, "max": max_slots, "free": busy < max_slots, "pids": pids}
     except Exception:
         return None
 
 
-def _vaga_ocupada(path):
-    """True quando a vaga existe e o flock exclusivo está tomado por outro fd."""
+def _vaga_estado(path):
+    """(ocupada, pid) da vaga: flock exclusivo tomado e pid do último carimbo."""
     # Inexistente = livre (não cria); demais erros de abertura propagam
     # para a sonda devolver None (desconhecido).
     try:
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return False
+        return False, None
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return True
+            return True, _pid_do_carimbo(fd)
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
+        return False, None
     finally:
         os.close(fd)
+
+
+def _pid_do_carimbo(fd):
+    """Pid da última linha carimbada na vaga; ausente ou ilegível é None."""
+    try:
+        fim = os.fstat(fd).st_size
+        campos = os.pread(fd, 64, max(0, fim - 64)).decode(errors="replace").split()
+    except OSError:
+        return None
+    for campo in reversed(campos):
+        if campo.isdigit():
+            return int(campo)
+    return None
 
 
 def _cache_until(cache, name, now):

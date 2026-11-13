@@ -340,6 +340,43 @@ def test_ignorado_em_diretorio_preexistente_muda_a_impressao(tmp_path):
     assert wr._ignored_fingerprint(tmp_path) != antes
 
 
+def test_ignorado_com_conteudo_trocado_e_metadados_preservados_muda_a_impressao(tmp_path):
+    import subprocess
+    import worker_router as wr
+
+    # Achado: tamanho e mtime preservados não comprovam integridade; o conteúdo
+    # alterado precisa mudar a impressão (hash), senão libera fallback indevido.
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    (tmp_path / "build").mkdir()
+    os.symlink("..", tmp_path / "build" / "atalho")
+    os.mkfifo(tmp_path / "build" / "fifo")
+    alvo = tmp_path / "build" / "cache.bin"
+    alvo.write_text("aaaa")
+    antes = wr._ignored_fingerprint(tmp_path)
+    assert antes is not None
+    stat_antigo = alvo.stat()
+    alvo.write_text("bbbb")  # mesmo tamanho
+    os.utime(alvo, ns=(stat_antigo.st_atime_ns, stat_antigo.st_mtime_ns))
+    assert alvo.stat().st_size == stat_antigo.st_size
+    assert alvo.stat().st_mtime_ns == stat_antigo.st_mtime_ns
+    depois = wr._ignored_fingerprint(tmp_path)
+    assert depois is not None and depois != antes
+
+
+def test_ignorado_grande_demais_para_conferir_nega_a_impressao(tmp_path):
+    import subprocess
+    import worker_router as wr
+
+    # Acima do teto de leitura a integridade não é comprovável: impressão None
+    # (o fallback por estado é negado).
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "big.bin").write_bytes(b"x" * (wr._ARVORE_MAX_BYTES + 1))
+    assert wr._ignored_fingerprint(tmp_path) is None
+
+
 def test_modulo_ausente_com_marcador_ou_strict_exige_parar(tmp_path, monkeypatch):
     import worker_router as wr
 

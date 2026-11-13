@@ -458,7 +458,9 @@ pega_vaga() { # segura uma vaga no fd 8 ate o fim do processo; 75 se esgotar a e
   while :; do
     for i in $(seq 1 "$slots"); do
       exec 8>>"/tmp/opencode-ask-$(id -u).vaga$i" || return 1
-      flock -n 8 && return 0
+      # Pid no carimbo da vaga: a sonda do roteador correlaciona a execução com
+      # a reserva e não conta a mesma vaga duas vezes (append; leitor usa a última linha).
+      flock -n 8 && { echo $$ >&8; return 0; }
       exec 8>&-
     done
     [ -z "$avisou" ] && { echo "opencode-ask: $slots vagas ocupadas; aguardando ate ${espera}s" >&2; avisou=1; }

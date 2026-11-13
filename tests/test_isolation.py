@@ -556,3 +556,79 @@ def test_copy_symlink_recusa_alvo_absoluto_e_escape(tmp_path):
     assert not os.path.lexists(slot / "sub" / "abs")
     assert not os.path.lexists(slot / "sub" / "escape")
     assert os.readlink(slot / "sub" / "interno") == "../base.txt"
+
+
+# ---- 26. symlinks versionados no HEAD ----
+
+
+def test_prepare_remove_symlink_versionado_que_sai_do_slot(repo, deps, tmp_path):
+    # Links limpos do HEAD voltam pelo checkout sem passar por _copy_symlink
+    # (que só vê o overlay): absoluto ou em fuga daria acesso fora da cópia.
+    alvo = tmp_path / "alvo-fora.txt"
+    alvo.write_text("fora\n", encoding="utf-8")
+    os.symlink(str(alvo), repo / "link-abs")
+    os.symlink("../../fora.txt", repo / "link-fuga")
+    os.symlink("..", repo / "link-dir-fuga")
+    os.symlink("base.txt", repo / "link-interno")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "links")
+    s = wi.open_session(str(repo), [], "run1", deps, environ={})
+    try:
+        wi.prepare(s, [], deps, environ={})
+        slot = Path(s.slot)
+        assert not os.path.lexists(slot / "link-abs")
+        assert not os.path.lexists(slot / "link-fuga")
+        assert not os.path.lexists(slot / "link-dir-fuga")
+        assert os.readlink(slot / "link-interno") == "base.txt"
+        assert (slot / "base.txt").is_file()
+    finally:
+        wi.close_session(s)
+
+
+def test_validate_slot_symlinks_link_ilegivel_e_removido(repo, deps, monkeypatch):
+    os.symlink("base.txt", repo / "link-ok")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "link")
+    s = wi.open_session(str(repo), [], "run1", deps, environ={})
+    real_readlink = os.readlink
+
+    def readlink_quebra(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == "link-ok":
+            raise OSError("boom")
+        return real_readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "readlink", readlink_quebra)
+    try:
+        wi.prepare(s, [], deps, environ={})
+        assert not os.path.lexists(os.path.join(s.slot, "link-ok"))
+    finally:
+        wi.close_session(s)
+
+
+def test_validate_slot_symlinks_falha_de_varredura_para_com_erro(repo, deps, monkeypatch):
+    (repo / "sub").mkdir()
+    (repo / "sub" / "x.txt").write_text("x\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "sub")
+    s = wi.open_session(str(repo), [], "run1", deps, environ={})
+    real_scandir = os.scandir
+
+    def scandir_quebra(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == "sub":
+            raise OSError("boom")
+        return real_scandir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "scandir", scandir_quebra)
+    try:
+        with pytest.raises(wi.IsolationError):
+            wi.prepare(s, [], deps, environ={})
+    finally:
+        wi.close_session(s)
+
+
+def test_symlink_foge_caminho_incomparavel_conta_como_fuga(tmp_path):
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    # Raiz relativa com destino absoluto: commonpath não decide, vira fuga.
+    assert wi._symlink_foge("relativo", "/abs/dst", "alvo") is True
+    assert wi._symlink_foge(str(slot), str(slot / "a"), "b") is False

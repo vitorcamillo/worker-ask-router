@@ -1100,11 +1100,41 @@ def _tree_fingerprint(cwd):
         return None
 
 
+def _hash_arquivo(path, teto):
+    """Sha256 de arquivo regular com teto de leitura; None se ilegível ou acima do teto."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        if not statmod.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        h = hashlib.sha256()
+        total = 0
+        while True:
+            bloco = os.read(fd, 65536)
+            if not bloco:
+                return h.hexdigest()
+            total += len(bloco)
+            if total > teto:
+                return None
+            h.update(bloco)
+    except OSError:
+        return None
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
 def _ignored_fingerprint(cwd):
     """Conjunto de caminhos ignorados pelo git; None quando não dá para avaliar.
 
     O status comum (base de _tree_fingerprint) não lista ignorados: arquivo
     criado em caminho ignorado no slot ficaria invisível à comparação de estado.
+    Conteúdo de arquivo regular entra como hash: metadados preservados não
+    comprovam integridade, e sem prova a impressão é None (fallback negado).
     Leitura pura: nunca levanta; `--ignored=matching` mostra quem casa com
     padrão (diretório inteiro, sem descer no conteúdo).
     """
@@ -1136,9 +1166,20 @@ def _ignored_fingerprint(cwd):
             while pilha:
                 atual = pilha.pop()
                 st = os.lstat(atual)
-                itens.add((atual, st.st_mode, st.st_size, st.st_mtime_ns))
                 if statmod.S_ISDIR(st.st_mode):
+                    itens.add((atual, st.st_mode, None))
                     pilha.extend(e.path for e in os.scandir(atual))
+                elif statmod.S_ISLNK(st.st_mode):
+                    itens.add((atual, st.st_mode, "symlink:" + os.readlink(atual)))
+                elif statmod.S_ISREG(st.st_mode):
+                    if st.st_size > _ARVORE_MAX_BYTES:
+                        return None  # grande demais para conferir: integridade não comprovável
+                    conteudo = _hash_arquivo(atual, _ARVORE_MAX_BYTES)
+                    if conteudo is None:
+                        return None
+                    itens.add((atual, st.st_mode, conteudo))
+                else:
+                    itens.add((atual, st.st_mode, None))
                 if len(itens) > _ARVORE_MAX_CAMINHOS:
                     return None
         return itens

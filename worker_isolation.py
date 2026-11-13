@@ -491,6 +491,7 @@ def _prepare_attempt(session, allowed, deps, environ, snap_before, started_ts, s
     sha = _head_sha(session.real_top)
     _reset_slot(session, sha)
     overlay_files, skipped_sensitive, skipped_nested = _apply_overlay(session, deps, environ)
+    _validate_slot_symlinks(session)
     _copy_allowed(session, allowed, deps)
     links = _create_links(session, deps, environ)
     os.makedirs(session.slot_cwd, exist_ok=True)
@@ -516,6 +517,31 @@ def _reset_slot(session, sha: str) -> None:
         proc = _git(args, session.slot, timeout=GIT_HEAVY_TIMEOUT_S, no_hooks=True)
         if proc.returncode != 0:
             raise IsolationError("isolamento: falha ao limpar slot")
+
+
+def _validate_slot_symlinks(session: Session) -> None:
+    """Remove do slot todo symlink que aponte fora da cópia.
+
+    O checkout repõe symlinks versionados limpos sem passar por _copy_symlink
+    (que só vê o overlay): um link versionado absoluto ou em fuga daria ao
+    worker acesso a arquivos fora do slot, inclusive na árvore real.
+    """
+
+    def _negar(erro):
+        raise IsolationError("isolamento: falha ao varrer symlinks do slot") from erro
+
+    for base, dirs, files in os.walk(session.slot, followlinks=False, onerror=_negar):
+        for nome in dirs + files:
+            caminho = os.path.join(base, nome)
+            if not os.path.islink(caminho):
+                continue
+            try:
+                alvo = os.readlink(caminho)
+            except OSError:
+                _remove_in_slot(caminho)  # ilegível não pode ser provado seguro
+                continue
+            if _symlink_foge(session.slot, caminho, alvo):
+                _remove_in_slot(caminho)
 
 
 def _apply_overlay(session, deps, environ):
@@ -642,6 +668,19 @@ def _copy_regular(src: str, dst: str, max_file_bytes: int):
         os.close(fd)
 
 
+def _symlink_foge(slot_root: str, dst: str, alvo: str) -> bool:
+    """True quando o symlink em dst com alvo aponta fora do slot_root."""
+    # Alvo absoluto ou que sai do slot daria ao worker leitura/escrita fora
+    # da cópia: o link não pode existir no slot.
+    raiz = os.path.normpath(slot_root)
+    final = os.path.normpath(os.path.join(os.path.dirname(dst), alvo))
+    try:
+        dentro = os.path.commonpath([raiz, final]) == raiz
+    except ValueError:  # mistura de caminho absoluto e relativo: inconfundível
+        dentro = False
+    return os.path.isabs(alvo) or not dentro
+
+
 def _copy_symlink(slot_root: str, src: str, dst: str) -> None:
     """Recria no slot o symlink da origem; alvo ilegível vira remoção do destino."""
     try:
@@ -649,11 +688,7 @@ def _copy_symlink(slot_root: str, src: str, dst: str) -> None:
     except OSError:
         _remove_in_slot(dst)
         return
-    # Alvo absoluto ou que sai do slot daria ao worker leitura/escrita fora
-    # da cópia: o link não é recriado.
-    raiz = os.path.normpath(slot_root)
-    final = os.path.normpath(os.path.join(os.path.dirname(dst), target))
-    if os.path.isabs(target) or os.path.commonpath([raiz, final]) != raiz:
+    if _symlink_foge(slot_root, dst, target):
         _remove_in_slot(dst)
         return
     _ensure_parent_dir(slot_root, dst)

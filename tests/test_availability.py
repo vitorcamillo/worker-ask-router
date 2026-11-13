@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -146,17 +147,18 @@ def test_slots_opencode(tmp_path, monkeypatch):
     monkeypatch.delenv("WORKER_ASK_SLOT_PROBE", raising=False)
     monkeypatch.delenv("OPENCODE_ASK_SLOTS", raising=False)
     monkeypatch.setenv("WORKER_ASK_OPENCODE_VAGA_DIR", str(tmp_path))
-    assert av.slots("opencode-ask") == {"active": 0, "max": 2, "free": True}
+    assert av.slots("opencode-ask") == {"active": 0, "max": 2, "free": True, "pids": []}
     vaga = tmp_path / f"opencode-ask-{os.getuid()}.vaga1"
     fd = os.open(vaga, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        assert av.slots("opencode-ask") == {"active": 1, "max": 2, "free": True}
+        os.pwrite(fd, b"4242\n", 0)
+        assert av.slots("opencode-ask") == {"active": 1, "max": 2, "free": True, "pids": [4242]}
         monkeypatch.setenv("OPENCODE_ASK_SLOTS", "1")
-        assert av.slots("opencode-ask") == {"active": 1, "max": 1, "free": False}
+        assert av.slots("opencode-ask") == {"active": 1, "max": 1, "free": False, "pids": [4242]}
     finally:
         os.close(fd)
-    assert av.slots("opencode-ask") == {"active": 0, "max": 1, "free": True}
+    assert av.slots("opencode-ask") == {"active": 0, "max": 1, "free": True, "pids": []}
 
 
 def test_slots_zcode(tmp_path, monkeypatch):
@@ -164,7 +166,7 @@ def test_slots_zcode(tmp_path, monkeypatch):
     import zcode_worker.base as base
 
     monkeypatch.setattr(base, "_read_settings", lambda: 3)
-    monkeypatch.setattr(base, "count_active_cli_processes", lambda *a, **k: 3)
+    monkeypatch.setattr(base, "active_cli_pids", lambda *a, **k: [101, 202, 303])
     monkeypatch.setattr(
         base, "_read_mem_available_bytes", lambda *a, **k: 8 * 1024 * 1024 * 1024
     )
@@ -173,12 +175,13 @@ def test_slots_zcode(tmp_path, monkeypatch):
         "max": 3,
         "mem_ok": True,
         "free": False,
+        "pids": [101, 202, 303],
     }
 
     def quebra(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(base, "count_active_cli_processes", quebra)
+    monkeypatch.setattr(base, "active_cli_pids", quebra)
     assert av.slots("zcode-worker") is None
 
 
@@ -267,3 +270,29 @@ def test_reserve_conta_ocupacao_externa(tmp_path, monkeypatch):
     assert av.reserve("zcode-worker", tmp_path) is False
     av.release(a)
     av.release(b)
+
+
+def test_reserve_nao_conta_duas_vezes_execucao_ja_sondada(tmp_path, monkeypatch):
+    # Achado: teto 2 com uma única execução ativa que já aparece na sonda não
+    # pode somar a própria reserva jovem como pendente e negar a vaga livre.
+    filho = subprocess.Popen(["sleep", "10"])
+    try:
+        sonda = {"active": 1, "max": 2, "free": True, "pids": [filho.pid]}
+        monkeypatch.setattr(av, "slots", lambda nome: sonda)
+        a = av.reserve("zcode-worker", tmp_path)  # reserva da execução já sondada
+        assert isinstance(a, int) and not isinstance(a, bool)
+        b = av.reserve("zcode-worker", tmp_path)
+        assert isinstance(b, int) and not isinstance(b, bool)  # vaga livre de verdade
+        av.release(a)
+        av.release(b)
+        # Pids sem ancestralidade com o dono da reserva: volta a contar pendente.
+        monkeypatch.setattr(
+            av, "slots", lambda nome: {"active": 1, "max": 2, "free": True, "pids": [1]}
+        )
+        c = av.reserve("zcode-worker", tmp_path)
+        assert isinstance(c, int) and not isinstance(c, bool)
+        assert av.reserve("zcode-worker", tmp_path) is False
+        av.release(c)
+    finally:
+        filho.kill()
+        filho.wait()
