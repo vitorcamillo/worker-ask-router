@@ -324,3 +324,35 @@ def test_unitario_marcador_sem_sufixo_efeitos_nao_bloqueia(tmp_path, monkeypatch
     args = _cenario_unitario(tmp_path, monkeypatch)
     args["marker"] = b"launcher_incompatible"
     assert wr._iso_no_effect(**args) is True
+
+
+def test_ignorado_em_diretorio_preexistente_muda_a_impressao(tmp_path):
+    import subprocess
+    import worker_router as wr
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / ".gitignore").write_text("build/\n")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "base.txt").write_text("a")
+    antes = wr._ignored_fingerprint(tmp_path)
+    assert antes is not None and wr._ignored_fingerprint(tmp_path) == antes
+    (tmp_path / "build" / "cache.bin").write_text("x")
+    assert wr._ignored_fingerprint(tmp_path) != antes
+
+
+def test_modulo_ausente_com_marcador_ou_strict_exige_parar(tmp_path, monkeypatch):
+    import worker_router as wr
+
+    monkeypatch.delenv("WORKER_ASK_ISOLATION_STRICT", raising=False)
+    sub = tmp_path / "a" / "b"
+    sub.mkdir(parents=True)
+    assert wr._iso_exigido_sem_modulo(sub) is False
+    (tmp_path / ".worker-ask-isolation").write_text("write\n")
+    assert wr._iso_exigido_sem_modulo(sub) is True
+    monkeypatch.setenv("WORKER_ASK_ISOLATION_STRICT", "1")
+    assert wr._iso_exigido_sem_modulo("/") is True
+    monkeypatch.delenv("WORKER_ASK_ISOLATION_STRICT")
+    monkeypatch.delenv("WORKER_ASK_ISOLATION", raising=False)
+    monkeypatch.setitem(sys.modules, "worker_isolation", None)  # import falha
+    with pytest.raises(SystemExit):
+        wr._iso_requested(str(sub), "write")

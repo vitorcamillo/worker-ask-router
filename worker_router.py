@@ -1127,7 +1127,21 @@ def _ignored_fingerprint(cwd):
                 if tok.startswith(b"!! ")]
         if len(rels) > _ARVORE_MAX_CAMINHOS:
             return None
-        return {os.path.normpath(os.path.join(raiz, rel)) for rel in rels}
+        # Desce no conteúdo: arquivo novo em diretório ignorado que já existia
+        # precisa mudar a impressão (o status só lista o diretório).
+        itens = set()
+        for rel in rels:
+            topo = os.path.normpath(os.path.join(raiz, rel))
+            pilha = [topo]
+            while pilha:
+                atual = pilha.pop()
+                st = os.lstat(atual)
+                itens.add((atual, st.st_mode, st.st_size, st.st_mtime_ns))
+                if statmod.S_ISDIR(st.st_mode):
+                    pilha.extend(e.path for e in os.scandir(atual))
+                if len(itens) > _ARVORE_MAX_CAMINHOS:
+                    return None
+        return itens
     except Exception:
         return None
 
@@ -1335,19 +1349,33 @@ def _iso_deps(wi):
                    max_paths=_ARVORE_MAX_CAMINHOS)
 
 
+def _iso_exigido_sem_modulo(cwd):
+    """Sem o módulo não dá para ler o marcador: STRICT ou marcador presente exigem parar."""
+    if os.environ.get("WORKER_ASK_ISOLATION_STRICT", "") in ("1",):
+        return True
+    pasta = os.path.abspath(cwd)
+    while True:
+        if os.path.lexists(os.path.join(pasta, ".worker-ask-isolation")):
+            return True
+        pai = os.path.dirname(pasta)
+        if pai == pasta:
+            return False
+        pasta = pai
+
+
 def _iso_requested(cwd, mode):
     """Módulo de isolamento quando esta invocação deve rodar isolada; None caso contrário."""
     explicit = os.environ.get("WORKER_ASK_ISOLATION", "").strip().lower()
     try:
         import worker_isolation as wi
     except ImportError:
-        if explicit in ("write", "all"):
+        if explicit in ("write", "all") or _iso_exigido_sem_modulo(cwd):
             _err("erro: isolamento pedido mas worker_isolation.py ausente")
             sys.exit(1)
         return None
     except Exception:
         # Módulo quebrado nunca derruba a execução direta; só para se o isolamento foi pedido.
-        if explicit in ("write", "all"):
+        if explicit in ("write", "all") or _iso_exigido_sem_modulo(cwd):
             _err("erro: isolamento pedido mas worker_isolation.py invalido")
             sys.exit(1)
         _err("aviso: worker_isolation.py invalido; seguindo sem isolamento")
