@@ -632,3 +632,57 @@ def test_symlink_foge_caminho_incomparavel_conta_como_fuga(tmp_path):
     # Raiz relativa com destino absoluto: commonpath não decide, vira fuga.
     assert wi._symlink_foge("relativo", "/abs/dst", "alvo") is True
     assert wi._symlink_foge(str(slot), str(slot / "a"), "b") is False
+
+
+def test_symlink_foge_composicao_com_link_intermediario(tmp_path):
+    # `a -> .` e `b -> a/../fora.txt` são internos na forma lexical, mas o
+    # kernel resolve `a` antes do `..`: b sai do slot de verdade.
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    os.symlink(".", slot / "a")
+    assert wi._symlink_foge(str(slot), str(slot / "a"), ".") is False
+    assert wi._symlink_foge(str(slot), str(slot / "b"), "a/../fora.txt") is True
+
+
+def test_symlink_foge_ciclo_de_links_conta_como_fuga(tmp_path):
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    os.symlink("y", slot / "x")
+    os.symlink("x", slot / "y")
+    os.symlink("z", slot / "z")
+    assert wi._symlink_foge(str(slot), str(slot / "x"), "y") is True
+    assert wi._symlink_foge(str(slot), str(slot / "y"), "x") is True
+    assert wi._symlink_foge(str(slot), str(slot / "z"), "z") is True
+
+
+def test_copy_symlink_recusa_composicao_com_link_intermediario(tmp_path):
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    origem = tmp_path / "origem"
+    origem.mkdir()
+    os.symlink(".", origem / "a")
+    os.symlink("a/../fora.txt", origem / "b")
+    wi._copy_symlink(str(slot), str(origem / "a"), str(slot / "a"))
+    wi._copy_symlink(str(slot), str(origem / "b"), str(slot / "b"))
+    assert os.readlink(slot / "a") == "."
+    assert not os.path.lexists(slot / "b")
+
+
+def test_prepare_remove_composicao_e_ciclo_versionados(repo, deps, tmp_path):
+    # A composição também entra pelo checkout de links versionados: a
+    # validação efetiva remove o elo que foge e o ciclo e mantém `a -> .`.
+    (tmp_path / "fora.txt").write_text("fora\n", encoding="utf-8")
+    os.symlink(".", repo / "a")
+    os.symlink("a/../fora.txt", repo / "b")
+    os.symlink("loop", repo / "loop")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "composicao")
+    s = wi.open_session(str(repo), [], "run1", deps, environ={})
+    try:
+        wi.prepare(s, [], deps, environ={})
+        slot = Path(s.slot)
+        assert os.readlink(slot / "a") == "."
+        assert not os.path.lexists(slot / "b")
+        assert not os.path.lexists(slot / "loop")
+    finally:
+        wi.close_session(s)

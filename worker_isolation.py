@@ -669,16 +669,67 @@ def _copy_regular(src: str, dst: str, max_file_bytes: int):
 
 
 def _symlink_foge(slot_root: str, dst: str, alvo: str) -> bool:
-    """True quando o symlink em dst com alvo aponta fora do slot_root."""
-    # Alvo absoluto ou que sai do slot daria ao worker leitura/escrita fora
-    # da cópia: o link não pode existir no slot.
+    """True quando o symlink em dst com alvo resolve, de fato, fora do slot_root."""
+    # Alvo absoluto, fuga por composição (o kernel resolve o elo `a` antes do
+    # `..` de `a/..`, então links internos na forma lexical podem sair do slot)
+    # ou ciclo daria ao worker leitura/escrita fora da cópia: o link não fica.
     raiz = os.path.normpath(slot_root)
-    final = os.path.normpath(os.path.join(os.path.dirname(dst), alvo))
+    if os.path.isabs(alvo):
+        return True
+    try:
+        base_rel = os.path.relpath(os.path.dirname(os.path.normpath(dst)), raiz)
+    except ValueError:  # raiz e dst incomparáveis (absoluto x relativo): fuga
+        return True
+    if base_rel == os.pardir or base_rel.startswith(os.pardir + os.sep):
+        return True  # dst fora do slot não pode ser provado seguro
+    final = _resolve_cadeia(raiz, base_rel, alvo)
+    if final is None:
+        return True  # elo intermediário absoluto, ilegível ou em ciclo
     try:
         dentro = os.path.commonpath([raiz, final]) == raiz
     except ValueError:  # mistura de caminho absoluto e relativo: inconfundível
         dentro = False
-    return os.path.isabs(alvo) or not dentro
+    return not dentro
+
+
+def _resolve_cadeia(raiz: str, base_rel: str, alvo: str) -> Optional[str]:
+    """Resolução efetiva de base_rel/alvo desde raiz seguindo elos intermediários.
+
+    Devolve o caminho final já resolvido, ou None quando a cadeia cicla, tem
+    elo ilegível ou elo intermediário de alvo absoluto (elo que o validador
+    recusa sozinho; quem depende dele também não fica). Componente ausente
+    encerra a resolução dali e o resto segue lexicalmente, como o kernel.
+    """
+    atual = raiz
+    pendente = alvo if base_rel in ("", os.curdir) else base_rel + os.sep + alvo
+    vistos = set()
+    while pendente:
+        nome, _, pendente = pendente.partition(os.sep)
+        if nome in ("", os.curdir):
+            continue
+        if nome == os.pardir:
+            atual = os.path.dirname(atual)
+            continue
+        candidato = os.path.join(atual, nome)
+        try:
+            st = os.lstat(candidato)
+        except OSError:
+            atual = candidato  # ausente: a cadeia segue sem elos dali
+            continue
+        if not stat.S_ISLNK(st.st_mode):
+            atual = candidato
+            continue
+        if candidato in vistos:
+            return None  # ciclo
+        vistos.add(candidato)
+        try:
+            sub = os.readlink(candidato)
+        except OSError:
+            return None
+        if os.path.isabs(sub):
+            return None
+        pendente = sub + os.sep + pendente if pendente else sub
+    return atual
 
 
 def _copy_symlink(slot_root: str, src: str, dst: str) -> None:
