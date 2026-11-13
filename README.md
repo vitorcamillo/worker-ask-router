@@ -38,7 +38,21 @@ worker-ask --cwd /caminho/do/projeto --orchestrator codex --mode plan "tarefa"
 worker-ask --cwd /caminho/do/projeto --orchestrator codex --mode write --allowed-file src/exemplo.py "tarefa"
 ```
 
-O roteador pula o executor da plataforma orquestradora. Fallback automático ocorre somente em saída 75 ou executável ausente. Saída 1 para; incompatibilidade conhecida do launcher apresenta diagnóstico estático, sem imprimir stderr privado. Em escrita, mudanças nos arquivos autorizados após saída 75 bloqueiam o fallback. A lista de arquivos é verificação de estado, não sandbox.
+O roteador pula o executor da plataforma orquestradora. Fallback automático ocorre somente em saída 75 ou executável ausente. Saída 1 para; incompatibilidade conhecida do launcher apresenta diagnóstico estático, sem imprimir stderr privado. Em escrita, mudanças nos arquivos autorizados após saída 75 bloqueiam o fallback. Sem isolamento, a lista de arquivos é verificação de estado, não sandbox; com o isolamento ligado (abaixo), só os arquivos autorizados voltam para o projeto.
+
+### Isolamento por worktree (opcional, desligado por padrão)
+
+Com `WORKER_ASK_ISOLATION=write` (ou `all`, que inclui `--mode plan`), o worker roda numa cópia do projeto e não no diretório real. Também liga por projeto: arquivo `.worker-ask-isolation` com `write` ou `all` entre o `--cwd` e a raiz do repositório. A variável vence o arquivo; `off` desliga.
+
+- **Cópia:** worktree git reaproveitado em `<state_dir>/worktrees/<repo>/slot-<n>` (até 8 por repositório; `WORKER_ASK_ISOLATION_SLOTS`, 1 a 32). A cada tentativa a cópia volta ao commit atual, recebe o estado não commitado do projeto (nunca arquivo de nome sensível nem repositório aninhado) e ganha atalhos para `node_modules`, `.venv` e `venv` ignorados pelo git (`WORKER_ASK_ISOLATION_LINKS`).
+- **Devolução:** ao fim de cada tentativa, qualquer que seja o rc, só os `--allowed-file` alterados na cópia são gravados no projeto. Trabalho parcial de worker que falhou também volta. Se o arquivo mudou no projeto durante a execução, nada é sobrescrito: aviso `conflito na devolucao`, rc 1 e a versão do worker fica na cópia.
+- **Fora do escopo:** arquivo alterado fora da lista não chega ao projeto; fica uma cópia em `<state_dir>/rejected/<run_id>/` por 7 dias (até 20 arquivos, 8 MiB).
+- **Sem slot livre** por 120 s: para com erro (`isolamento sem slot livre`), sem rodar direto.
+- **Quando não dá para isolar** (fora de git, repositório sem commit, `--cwd` ignorado pelo git, arquivo autorizado em repositório aninhado, estado não commitado acima de 512 MiB ou arquivo acima de 64 MiB): roda direto e registra `isolation: "none"` com o motivo. `WORKER_ASK_ISOLATION_STRICT=1` troca isso por rc 1.
+- **Limite:** não é sandbox de sistema. Worker com shell ainda consegue escrever fora da cópia por caminho absoluto; o roteador avisa (`arvore real mudou durante a execucao`) e conta em `real_tree_changed`. Os atalhos de dependência apontam para os diretórios reais.
+- **Operação:** `worker-ask --status` lista os slots; `worker-ask --isolation-gc` remove slots sem uso há 14 dias, slots de repositório que sumiu e cópias rejeitadas com mais de 7 dias. O `runs.jsonl` ganha `isolation`, `isolation_prep_s`, `overlay_files`, `sync_applied`, `sync_conflicts`, `oos_discarded` e `real_tree_changed`.
+
+**Fallback por estado** (`WORKER_ASK_STATE_FALLBACK=1`, só com isolamento, só em escrita): se um executor sem shell (ZCode, Muse, OpenCode) sai com rc 1 ou estoura o tempo e a cópia ficou idêntica (nenhum arquivo alterado, dentro ou fora do escopo) e os arquivos autorizados do projeto também, a cadeia segue para o próximo executor em vez de parar. A decisão usa só estado conferido, nunca texto de erro. Codex Luna e Claude Haiku têm shell e continuam parando. Cada vez que isso acontece conta em `state_fallbacks`.
 
 ### Apresentação e log
 
