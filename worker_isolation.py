@@ -649,6 +649,13 @@ def _copy_symlink(slot_root: str, src: str, dst: str) -> None:
     except OSError:
         _remove_in_slot(dst)
         return
+    # Alvo absoluto ou que sai do slot daria ao worker leitura/escrita fora
+    # da cópia: o link não é recriado.
+    raiz = os.path.normpath(slot_root)
+    final = os.path.normpath(os.path.join(os.path.dirname(dst), target))
+    if os.path.isabs(target) or os.path.commonpath([raiz, final]) != raiz:
+        _remove_in_slot(dst)
+        return
     _ensure_parent_dir(slot_root, dst)
     _remove_in_slot(dst)
     os.symlink(target, dst)

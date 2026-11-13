@@ -540,3 +540,19 @@ def test_close_session_idempotente(repo, deps):
     s = wi.open_session(str(repo), [], "run1", deps, environ={})
     wi.close_session(s)
     wi.close_session(s)
+
+
+def test_copy_symlink_recusa_alvo_absoluto_e_escape(tmp_path):
+    slot = tmp_path / "slot"
+    (slot / "sub").mkdir(parents=True)
+    fora = tmp_path / "fora.txt"
+    fora.write_text("x")
+    origem = tmp_path / "origem"
+    origem.mkdir()
+    casos = {"abs": str(fora), "escape": "../../fora.txt", "interno": "../base.txt"}
+    for nome, alvo in casos.items():
+        os.symlink(alvo, origem / nome)
+        wi._copy_symlink(str(slot), str(origem / nome), str(slot / "sub" / nome))
+    assert not os.path.lexists(slot / "sub" / "abs")
+    assert not os.path.lexists(slot / "sub" / "escape")
+    assert os.readlink(slot / "sub" / "interno") == "../base.txt"
