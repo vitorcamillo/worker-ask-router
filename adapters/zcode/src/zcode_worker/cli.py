@@ -41,7 +41,9 @@ _LAUNCHER_INCOMPATIBLE_MESSAGE = "launcher de autenticacao incompativel com o bu
 # com rc 1 sem casar RATE_RE; é limite temporário, não falha do CLI.
 _START_BUSY_RE = re.compile(r"concurrency\s+limit|Start Plan is busy|model_rate_limited", re.I)
 QUOTA_RETRY_DEFAULT_SECONDS = 3600
-START_PLAN_RETRY_DELAYS = (15, 30)
+# Sem espera: rate limit no Start segue ao plano pago na mesma chamada.
+# Limite de concorrência do Start é transitório: insiste no Start antes do pago.
+START_PLAN_RETRY_DELAYS = (5, 10, 20)
 WORKER_SESSION_TTL_SECONDS = 6 * 3600
 APP_TASKS_INDEX = os.environ.get(
     "ZCODE_WORKER_APP_TASKS_INDEX",
@@ -422,10 +424,13 @@ def _verify_resume(args, db_path=None) -> None:
         raise features.FeatureError("seleção da sessão diverge do pedido", "resume_mismatch")
 
 
-def _retry_allowed(args, error, attempt, deadline):
-    if args.mode != "plan" or not isinstance(error, features.FeatureError) or error.code != "rate_limit":
+def _retry_allowed(args, error, attempt, deadline, attempt_ms=None, db_path=None):
+    if not isinstance(error, features.FeatureError) or error.code != "rate_limit":
         return False
-    if getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID:
+    _is_start = getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID
+    if args.mode != "plan" and not (_is_start and attempt_ms is not None):
+        return False
+    if _is_start:
         # Rate limit do Start em plan é transitório (concorrência): tentar de
         # novo com atrasos curtos, sempre no Start. O retry nunca libera o
         # plano pago; esgotado, o erro propaga e vira exit 75 (relance).
@@ -437,6 +442,17 @@ def _retry_allowed(args, error, attempt, deadline):
         delay = float(delays[attempt])
         if time.monotonic() + delay >= deadline:
             return False
+        if args.mode != "plan":
+            # edit/yolo: só repete no Start se a tentativa recusada não deixou
+            # efeitos em disco; com efeitos, run_task decide (esgotar/pago).
+            if _start_attempt_had_effects(args.cwd, attempt_ms, db_path=db_path):
+                return False
+            # A sessão recusada fica viva até run_task ler os efeitos da fatia
+            # inteira; só então é apagada junto com as demais.
+            _deferred = getattr(args, "_rate_limit_stdout", None)
+            args._rate_limit_stdout = None
+            if _deferred is not None:
+                args._start_retry_stdouts = [*getattr(args, "_start_retry_stdouts", ()), _deferred]
         time.sleep(delay)
         return True
     delays = tuple(base.RETRY_DELAYS)
@@ -494,6 +510,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
             # _retry_allowed devolve False e o erro é propagado.
             _retry_budget = max(len(base.RETRY_DELAYS), len(START_PLAN_RETRY_DELAYS))
             for attempt in range(_retry_budget + 1):  # pragma: no branch
+                _attempt_ms = int(time.time() * 1000)
                 try:
                     if args.mode in {"edit", "yolo"}:
                         # A CLI pode ter escrito antes de devolver um erro ou
@@ -506,7 +523,7 @@ def _execute(args, task, *, db_path=None, runner=None, total_deadline=None, even
                         raise _fail_attempt(args, response[1], response[0], response[2], db_path=db_path)
                     return response
                 except features.FeatureError as error:
-                    if _retry_allowed(args, error, attempt, execution_deadline):
+                    if _retry_allowed(args, error, attempt, execution_deadline, _attempt_ms, db_path):
                         continue
                     raise
 
@@ -1031,13 +1048,8 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 except features.FeatureError as _probe_error:
                     _probe_code = getattr(_probe_error, "code", None)
                     if _probe_code == "rate_limit":
-                        # Start ocupado na sonda: transitório, sem plano pago
-                        # nesta chamada nem nas próximas — o orquestrador relança.
-                        features.mark_start_plan_unavailable("refused")
-                        raise features.FeatureError(
-                            "Start Plan ocupado (rate limit); o plano pago não é usado — relance em instantes",
-                            "quota",
-                        ) from _probe_error
+                        # Start ocupado na sonda: a MESMA chamada segue ao pago.
+                        features.mark_start_plan_unavailable("rate_limit")
                     elif _probe_code == "quota":
                         features.mark_start_plan_unavailable("quota", until=_probe_error_until(_probe_error))
                     elif _probe_code == "start_plan_drift":
@@ -1082,33 +1094,12 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 if _code == "start_plan_drift":
                     features.mark_start_plan_unavailable("drift")
                     _fallback = "drift"
-                elif _code == "rate_limit":
-                    # Start ocupado na execução: transitório, nunca vira plano
-                    # pago — nem nesta chamada (sem segunda perna) nem nas
-                    # próximas (o marcador não bloqueia o provider).
-                    features.mark_start_plan_unavailable("rate_limit")
-                    # A checagem de efeitos precisa da sessão ainda viva no
-                    # DB: sem ela a detecção vira conservadora (True).
-                    _rate_limit_effects = args.mode != "plan" and _start_attempt_had_effects(
-                        args.cwd, start_ms, db_path=db_path
-                    )
-                    # Exclusão adiada por _fail_attempt: agora que os efeitos
-                    # já foram lidos, a sessão falha pode ser apagada.
-                    _deferred_stdout = getattr(args, "_rate_limit_stdout", None)
-                    args._rate_limit_stdout = None
-                    if _deferred_stdout is not None:
-                        _delete_session_from_stdout(_deferred_stdout, db_path=db_path, keep=(args.resume,))
-                    if _rate_limit_effects:
-                        raise features.FeatureError(
-                            "Start Plan ocupado durante a fatia; revise o diff e relance",
-                            "start_plan_exhausted",
-                        ) from _error
-                    raise features.FeatureError(
-                        "Start Plan ocupado (rate limit); o plano pago não é usado — relance em instantes",
-                        "quota",
-                    ) from _error
                 else:
-                    features.mark_start_plan_unavailable("quota", until=_probe_error_until(_error))
+                    # rate_limit: marcador transitório; quota: marcador com reset.
+                    if _code == "rate_limit":
+                        features.mark_start_plan_unavailable("rate_limit")
+                    else:
+                        features.mark_start_plan_unavailable("quota", until=_probe_error_until(_error))
                     _fallback = _code
                     # A checagem de efeitos precisa da sessão ainda viva no
                     # DB: sem ela a detecção vira conservadora (True) e o
@@ -1122,8 +1113,11 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                     # já foram lidos, a sessão falha pode ser apagada.
                     _deferred_stdout = getattr(args, "_rate_limit_stdout", None)
                     args._rate_limit_stdout = None
-                    if _deferred_stdout is not None:
-                        _delete_session_from_stdout(_deferred_stdout, db_path=db_path, keep=(args.resume,))
+                    _pending = [*getattr(args, "_start_retry_stdouts", ()), _deferred_stdout]
+                    args._start_retry_stdouts = []
+                    for _stdout in _pending:
+                        if _stdout is not None:
+                            _delete_session_from_stdout(_stdout, db_path=db_path, keep=(args.resume,))
                     if _exhausted:
                         raise features.FeatureError(
                             "Start Plan esgotado durante a fatia; revise o diff e relance (a próxima chamada usa o plano)",
@@ -1337,6 +1331,8 @@ def _print_result(result: dict, as_json: bool) -> None:
             f"session={result.get('sessionId') or 'n/d'} "
             f"model={effective.get('modelId') or 'n/d'} "
             f"effort={effective.get('effort') or 'n/d'} "
+            # Qual plano atendeu (start = Start Plan; pago = plano da conta), para o runs.jsonl.
+            f"plan={'start' if effective.get('providerId') == features.START_PLAN_PROVIDER_ID else 'pago'} "
             f"input={usage.get('inputTokens', 'n/d')} "
             f"output={usage.get('outputTokens', 'n/d')} "
             f"cacheRead={usage.get('cacheReadTokens', 'n/d')} "

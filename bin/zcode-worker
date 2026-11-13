@@ -36,7 +36,8 @@ PROVIDER_ID = "account:zai-individual-coding-plan"
 MODELS = ("glm-5.3-flash", "glm-5.3")
 PROVIDER_MODELS = {"glm-5.3-flash": "GLM-5.3-Flash", "glm-5.3": "GLM-5.3"}
 EFFORTS = ("low", "high", "max")
-RETRY_DELAYS = (45, 90, 180)
+# Curto de propósito: rate limit persistente devolve 75 em ~45 s e o roteador entrega a outro worker.
+RETRY_DELAYS = (15, 30)
 MIN_MEM_AVAILABLE = 4 * 1024 * 1024 * 1024
 QUEUE_POLL_SECONDS = 2.0
 QUEUE_NOTICE_SECONDS = 30.0

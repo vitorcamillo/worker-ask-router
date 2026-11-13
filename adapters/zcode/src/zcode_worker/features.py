@@ -41,7 +41,7 @@ START_PLAN_MODELS = frozenset({"glm-5.3-flash"})
 START_PLAN_BUSY_MINUTES = 2
 # Sem regra de horário: disponibilidade é detectada na tentativa; quando não
 # há horário de volta confiável, recheca em pouco tempo.
-START_PLAN_RECHECK_MINUTES = 30
+START_PLAN_RECHECK_MINUTES = 5  # cota sem reset informado: volta a tentar o Start logo
 START_PLAN_MAX_BLOCK_DAYS = 7
 START_PLAN_MARKER = "start-plan-unavailable"
 START_PLAN_OK_MARKER = "start-plan-ok"
