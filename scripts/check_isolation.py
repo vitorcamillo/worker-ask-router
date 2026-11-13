@@ -272,11 +272,14 @@ def mutation():
                 except subprocess.TimeoutExpired:
                     print(f"BLOCK: timeout de ferramenta no mutante {name}")
                     return 2
-                killed = (
-                    changed.returncode == 1
-                    and "FAILED" in changed.stdout
-                    and "ERROR collecting" not in changed.stdout
-                )
+                if changed.returncode not in (0, 1) or "ERROR collecting" in changed.stdout:
+                    # rc fora de 0/1 ou erro de coleta é infraestrutura, não veredito:
+                    # não vale como morte nem como sobrevivência do mutante.
+                    print(f"BLOCK: falha de infraestrutura no mutante {name} (rc {changed.returncode})")
+                    print(changed.stdout[-2000:])
+                    print(changed.stderr[-2000:])
+                    return 2
+                killed = changed.returncode == 1 and "FAILED" in changed.stdout
                 results.append({"name": name, "source": source_rel, "tests": list(tests),
                                 "killed": killed})
                 print(f"{name} {'killed' if killed else 'survived'}", flush=True)

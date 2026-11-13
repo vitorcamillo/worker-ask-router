@@ -602,14 +602,18 @@ def test_sync_back_fchmod_com_oserror_ainda_aplica(repo, deps, monkeypatch):
         wi.close_session(s)
 
 
-def test_sync_back_sync_lock_diretorio_nao_levanta(repo, deps):
+def test_sync_back_sem_trava_do_repositorio_nao_devolve(repo, deps):
+    # sync.lock inutilizável (diretório): sem exclusão mútua a devolução inteira
+    # vira conflito em vez de escrever na árvore real sem serialização.
     s, prep = _abrir(repo, deps, ["a.txt"])
     try:
         os.makedirs(os.path.join(os.path.dirname(s.slot), "sync.lock"))
         (Path(s.slot_cwd) / "a.txt").write_text("novo\n", encoding="utf-8")
         resultado = wi.sync_back(s, ["a.txt"], prep, deps)
-        assert resultado.applied == ["a.txt"]
-        assert (repo / "a.txt").read_text(encoding="utf-8") == "novo\n"
+        assert resultado.applied == []
+        assert resultado.conflicts == ["a.txt"]
+        assert s.tainted is True
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "a\n"
         assert not os.path.exists(os.path.join(os.path.dirname(s.slot), "sync.jsonl"))
     finally:
         wi.close_session(s)

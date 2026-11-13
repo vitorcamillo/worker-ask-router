@@ -752,24 +752,52 @@ def isolation_notice(session: Session) -> str:
 
 
 def sync_back(session: Session, allowed, prep, deps) -> SyncResult:
-    """Devolve mudanças dos autorizados para a árvore real; conflito marca tainted."""
+    """Devolve mudanças dos autorizados para a árvore real; conflito marca tainted.
+
+    Conferência da árvore real, escrita e diário correm sob flock em sync.lock
+    do repositório: devoluções simultâneas de slots distintos não leem o mesmo
+    estado e não sobrescrevem umas às outras. Sem a trava nada é devolvido
+    (tudo vira conflito; escrever sem excluir pode perder devolução silenciosamente).
+    """
     if prep is None:
         return SyncResult([], [])
     antigo = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
         applied: list = []
         conflicts: list = []
-        for rel in allowed:
+        lock_fd = _sync_lock(session)
+        if lock_fd is None:
+            conflicts.extend(allowed)  # sem exclusão mútua não há devolução segura
+        else:
             try:
-                _sync_one(session, rel, prep, deps, applied, conflicts)
-            except Exception:
-                conflicts.append(rel)  # falha em um não derruba os outros
+                for rel in allowed:
+                    try:
+                        _sync_one(session, rel, prep, deps, applied, conflicts)
+                    except Exception:
+                        conflicts.append(rel)  # falha em um não derruba os outros
+                _log_sync(session, applied)
+            finally:
+                _release_lock(lock_fd)
         if conflicts:
             session.tainted = True
-        _log_sync(session, applied)
         return SyncResult(applied, conflicts)
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, antigo)
+
+
+def _sync_lock(session: Session):
+    """Abre sync.lock do repositório e retém flock exclusivo; None se não conseguiu."""
+    try:
+        fd = os.open(os.path.join(os.path.dirname(session.slot), "sync.lock"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    except OSError:
+        _release_lock(fd)
+        return None
+    return fd
 
 
 def _sync_one(session, rel, prep, deps, applied, conflicts) -> None:
@@ -900,23 +928,10 @@ def _read_regular(path, cap: int):
 
 
 def _log_sync(session, applied) -> None:
-    """Acrescenta a devolução ao sync.jsonl sob flock em sync.lock; falha é silenciosa."""
+    """Acrescenta a devolução ao sync.jsonl; a trava do repositório já está retida."""
     if not applied:
         return
-    repo_dir = os.path.dirname(session.slot)
-    try:
-        fd = os.open(os.path.join(repo_dir, "sync.lock"),
-                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    except OSError:
-        return
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except OSError:
-            return
-        _write_sync_entry(repo_dir, session, applied)
-    finally:
-        _release_lock(fd)
+    _write_sync_entry(os.path.dirname(session.slot), session, applied)
 
 
 def _write_sync_entry(repo_dir, session, applied) -> None:

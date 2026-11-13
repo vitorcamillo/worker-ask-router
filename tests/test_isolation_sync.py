@@ -3,6 +3,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -237,6 +238,41 @@ def test_sync_back_cwd_em_subdiretorio(repo, deps):
         assert (pkg / "m.txt").read_text(encoding="utf-8") == "slot m\n"
     finally:
         wi.close_session(s)
+
+
+def test_sync_back_simultaneo_ao_mesmo_arquivo_nao_sobrescreve(repo, deps):
+    # Dois slots devolvem o mesmo arquivo ao mesmo tempo: a trava por repositório
+    # serializa conferência e escrita; exatamente uma devolução aplica e a outra
+    # conflita (a árvore real mudou depois da preparação dela).
+    s0, prep0 = _abrir(repo, deps, ["a.txt"], run_id="run0")
+    s1, prep1 = _abrir(repo, deps, ["a.txt"], run_id="run1")
+    try:
+        (Path(s0.slot_cwd) / "a.txt").write_text("slot 0\n", encoding="utf-8")
+        (Path(s1.slot_cwd) / "a.txt").write_text("slot 1\n", encoding="utf-8")
+        resultados = {}
+        barreira = threading.Barrier(2)
+
+        def devolve(indice, sessao, prep):
+            barreira.wait(timeout=30)
+            resultados[indice] = wi.sync_back(sessao, ["a.txt"], prep, deps)
+
+        ts = [threading.Thread(target=devolve, args=(i, s, p))
+              for i, (s, p) in enumerate(((s0, prep0), (s1, prep1)))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(60)
+        assert not any(t.is_alive() for t in ts)
+        aplicados = sorted(i for i, r in resultados.items() if "a.txt" in r.applied)
+        conflitados = sorted(i for i, r in resultados.items() if "a.txt" in r.conflicts)
+        assert len(aplicados) == 1
+        assert conflitados == [1 - aplicados[0]]
+        assert (repo / "a.txt").read_text(encoding="utf-8") == f"slot {aplicados[0]}\n"
+        diario = Path(s0.slot).parent / "sync.jsonl"
+        assert len(diario.read_text(encoding="utf-8").splitlines()) == 1
+    finally:
+        wi.close_session(s0)
+        wi.close_session(s1)
 
 
 def test_sync_back_bloqueia_sinais_durante_a_copia(repo, deps, monkeypatch):

@@ -1459,6 +1459,10 @@ def _iso_no_effect(attempt, name, mode, cwd, allowed, snap_before, marker, deadl
         return False
     if attempt["fp_before"] != attempt["fp_after"]:
         return False
+    if attempt["prep"].links:
+        # Links de dependência apontam para caminhos ignorados pelo git na árvore real:
+        # fora da impressão do status, não há como provar a integridade; fallback negado.
+        return False
     try:
         if snapshot_allowed(attempt["cwd"], allowed) != attempt["prep"].snap_slot_before:
             return False

@@ -167,6 +167,23 @@ def test_nao_segue_marcador_launcher_incompativel(repo, tmp_path):
     assert b"fallback bloqueado" in r.stderr, r.stderr
 
 
+def test_nao_segue_com_link_de_dependencia(repo, tmp_path):
+    # node_modules ignorado vira link do slot para a árvore real: mudanças ali são
+    # invisíveis à impressão do git status; sem provar a integridade, o fallback é negado.
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "gitignore")
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "x.js").write_text("x\n", encoding="utf-8")
+    bin_dir = _bin(tmp_path, {"zcode-worker": SAIR_1})
+    r = _router(repo, _env(repo, tmp_path, bin_dir))
+    assert r.returncode == 1, r.stderr
+    assert b"sem efeito" not in r.stderr, r.stderr
+    assert _last_run(tmp_path).get("state_fallbacks", 0) == 0, r.stderr
+    assert (repo / "base.txt").read_text(encoding="utf-8") == "base\n", r.stderr
+    assert (repo / "node_modules" / "x.js").read_text(encoding="utf-8") == "x\n", r.stderr
+
+
 def test_chave_desligada_para_como_hoje(repo, tmp_path):
     bin_dir = _bin(tmp_path, {"zcode-worker": SAIR_1})
     for valor in (None, "0"):
@@ -229,7 +246,8 @@ def _cenario_unitario(tmp_path, monkeypatch):
     allowed = ["base.txt"]
     attempt = {"sync": SimpleNamespace(applied=[], conflicts=[]), "fp_before": {}, "fp_after": {},
                "cwd": str(copia),
-               "prep": SimpleNamespace(snap_slot_before=wr.snapshot_allowed(str(copia), allowed))}
+               "prep": SimpleNamespace(snap_slot_before=wr.snapshot_allowed(str(copia), allowed),
+                                       links=[])}
     monkeypatch.setattr(wr, "_ISO", {"x": 1})
     monkeypatch.setenv("WORKER_ASK_STATE_FALLBACK", "1")
     return {"attempt": attempt, "name": "zcode-worker", "mode": "write", "cwd": str(real),
@@ -269,6 +287,7 @@ MUTACOES = [
     pytest.param(lambda a, c: (c["copia"] / "base.txt").write_text("mudou\n", encoding="utf-8"), id="copia_alterada"),
     pytest.param(lambda a, c: (c["real"] / "base.txt").write_text("mudou\n", encoding="utf-8"), id="real_alterada"),
     pytest.param(lambda a, c: _trocar_por_symlink(c["copia"] / "base.txt"), id="copia_symlink"),
+    pytest.param(lambda a, c: setattr(a["attempt"]["prep"], "links", ["node_modules"]), id="links_dependencia"),
 ]
 
 
