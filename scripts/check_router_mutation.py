@@ -46,7 +46,7 @@ def main():
         stage = Path(directory)
         (stage / "tests").mkdir()
         shutil.copy2(TESTS, stage / "tests/test_worker_router.py")
-        for helper in ("quota_reset.py", "quota_provider.py", "conftest.py"):
+        for helper in ("quota_reset.py", "quota_provider.py", "availability.py", "conftest.py"):
             shutil.copy2(ROOT / helper, stage / helper)
         (stage / "pytest.ini").write_text("[pytest]\ntestpaths=tests\n")
         env = {k: v for k, v in os.environ.items() if not k.startswith("COVERAGE_")}

@@ -145,6 +145,18 @@ para preservar possiveis alteracoes parciais. Entrada antiga de timeout sem praz
 e ignorada. Cota desconhecida (`until=null`, `reset_known=false`) continua bloqueada.
 Os testes de cota usam HOME, provedores e CLIs sinteticos, sem contas.
 
+A tabela de disponibilidade (`availability.json`, gravada pelo timer
+`worker-ask-disponibilidade` ou por `worker-ask --refresh-availability`) tira a consulta
+de cota da chamada: o roteador le o prazo de cada worker na tabela, sonda vagas ao vivo
+(ZCode e OpenCode) e entrega direto ao primeiro livre. Sem vaga, o skip sai com motivo
+`ocupado`; fila de admissao cheia aparece como `fila` e nao grava cooldown. A fila do
+zcode-worker cai para 5 segundos (so margem de corrida) e o opencode-ask recebe
+`OPENCODE_ASK_WAIT=6` por padrao. Antes de lancar, o roteador reserva a vaga com flock
+(`vaga-<worker>-<i>.lock` no state dir), entao chamadas simultaneas nao disputam a mesma vaga:
+quem fica sem reserva sai como `ocupado` na hora. Ninguem livre: rc 75 imediato com o motivo de cada
+worker da cadeia. Tabela ausente mantem o comportamento anterior; tabela vencida ou
+invalida cai na consulta sincrona da chamada, com aviso (timer parado?).
+
 O parametro `--orchestrator` identifica quem delega e nao exclui workers da mesma plataforma.
 Codex tambem pode usar o worker Luna (`codex-ask`). A protecao contra recursao e
 `WORKER_ASK_ACTIVE=1`, propagada aos workers: eles nao podem delegar outra tarefa ao roteador.

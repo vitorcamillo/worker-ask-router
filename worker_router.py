@@ -35,7 +35,8 @@ DEFAULT_MIN_TIMEOUT = 300.0
 TIMEOUT_COOLDOWN_SECONDS = 300.0
 # Cota excedida sem reset conhecido: cooldown finito em vez de bloqueio permanente.
 UNKNOWN_RESET_COOLDOWN_SECONDS = 3600.0
-DEFAULT_ZCODE_QUEUE_TIMEOUT = 600.0
+# A vaga e conferida antes de lancar; a fila do zcode vira so margem de corrida.
+DEFAULT_ZCODE_QUEUE_TIMEOUT = 5.0
 
 _CURRENT_PROC = None
 _INTERRUPTED = False
@@ -57,7 +58,7 @@ _LOG_REPORTED = False
 _LOG_ENDS_WITH_NEWLINE = True
 _EVENT_FD = None
 _EVENT_FD_READY = False
-_USAGE_KEYS = ("session", "model", "effort", "input", "output", "cacheRead", "cacheWrite")
+_USAGE_KEYS = ("session", "model", "effort", "plan", "input", "output", "cacheRead", "cacheWrite")
 
 
 def _write_all(fd, data):
@@ -1185,6 +1186,8 @@ def _safe_failure_marker(stderr_data):
         return b"launcher_incompatible"
     if any(line.startswith(b"ERRO: fila de admiss") and b"nenhum worker iniciado" in line for line in stderr_data.splitlines()):
         return b"admission_busy"
+    if any(line.startswith(b"opencode-ask: vagas ocupadas") for line in stderr_data.splitlines()):
+        return b"admission_busy"
     reset = marker_reset(stderr_data)
     return (MARKER + str(reset)).encode() if reset is not None else b""
 
@@ -1195,6 +1198,8 @@ def run_wrapper(argv, cwd, prompt_bytes, timeout, isolated=False):
     env = {k: v for k, v in os.environ.items() if k not in ("MUSE_ASK_MODEL", "MUSE_ASK_EFFORT", "ASK_PRESENTATION_FD")}
     env["WORKER_ASK_ACTIVE"] = "1"
     env["WORKER_ASK_QUOTA_HELPER"] = str(Path(__file__).resolve().with_name("quota_reset.py"))
+    # O opencode-ask espera vaga ate 900 s por padrao; quem definiu a variavel mantem o valor.
+    env.setdefault("OPENCODE_ASK_WAIT", "6")
     if isolated:
         env["WORKER_ASK_ISOLATED"] = "1"
     with contextlib.ExitStack() as stack:
@@ -1495,6 +1500,8 @@ def _main_impl(argv=None):
     parser.add_argument("--no-muse", action="store_true")
     parser.add_argument("--orchestrator", choices=list(ORCHESTRATORS))
     parser.add_argument("--status", action="store_true")
+    parser.add_argument("--refresh-availability", action="store_true",
+                        help="atualiza a tabela de disponibilidade e sai")
     parser.add_argument("--task-id", help="identifica a fatia; grava task_id no runs.jsonl e habilita o orcamento de relancamentos")
     parser.add_argument("--mark-redo", metavar="ID", help="registra evento redo para a task_id informada e sai")
     parser.add_argument("--stats", action="store_true", help="imprime resumo JSON dos runs.jsonl e sai")
@@ -1561,10 +1568,24 @@ def _main_impl(argv=None):
         slots = _iso_status()
         if slots:
             out["isolation_slots"] = slots
+        import availability
+        table = availability.load(_state_dir())
+        out["availability"] = availability.describe(table, cache, now)
+        out["availability_age"] = None if table is None else now - table["generated_at"]
         status_text = json.dumps(out) + "\n"
         sys.stdout.write(status_text)
         if not _log_write(status_text.encode("utf-8", "replace")):
             _note_log_failure()
+            sys.exit(1)
+        sys.exit(0)
+
+    if args.refresh_availability:
+        try:
+            sd = ensure_state_dir(create=True)
+            import availability
+            availability.refresh(sd)
+        except RuntimeError as e:
+            _err(str(e))
             sys.exit(1)
         sys.exit(0)
 
@@ -1745,6 +1766,14 @@ def _main_impl(argv=None):
     had_timeout = False
     _iso_start(args.mode, cwd, allowed, deadline)
 
+    import availability
+    usar_tabela = not args.retry_exhausted
+    table = availability.load(_state_dir()) if usar_tabela else None
+    if usar_tabela and table is None and (_state_dir() / availability.TABLE_NAME).exists():
+        _err("aviso: tabela de disponibilidade vencida ou invalida; consultando cota na chamada "
+             "(timer worker-ask-disponibilidade parado?)")
+    indisponiveis = []   # (nome, motivo, until ou None), para a mensagem final
+
     for name, orch in chain:
         if time.monotonic() >= deadline:
             _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
@@ -1758,27 +1787,42 @@ def _main_impl(argv=None):
                     entry = None
             if entry and time.time() < entry["until"]:
                 _event("skip", f"{name}: skip (cooldown)", executor=name, reason="cooldown")
+                indisponiveis.append((name, "cooldown", entry["until"]))
                 continue
         path = shutil.which(WRAPPER_BINARIES.get(name, name))
         if path is None:
             _event("skip", f"{name}: skip (wrapper ausente)", executor=name, reason="ausente")
+            indisponiveis.append((name, "ausente", None))
             continue
 
-        if name not in cache and not args.retry_exhausted:
+        if table is None and name not in cache and not args.retry_exhausted:
+            # Contingencia: tabela de disponibilidade ausente ou vencida; consulta sincrona.
             from quota_provider import query_reset
             reset = query_reset(name, budget=max(0, deadline - time.monotonic()))
             if time.monotonic() >= deadline:
                 _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
-            if reset is not None:
-                quota_entry = {"wrapper": name, "until": reset, "reset_known": True}
-                try:
-                    save_cache({name: quota_entry})
-                except RuntimeError as e:
-                    _err(str(e))
-                    sys.exit(1)
-                cache[name] = quota_entry
-                _event("skip", f"{name}: skip (cota ate {reset:g})", executor=name, reason="cota", until=reset)
-                continue
+        elif table is not None:
+            reset = availability.blocked_until(table, name)
+        else:
+            reset = None
+        if reset is not None:
+            quota_entry = {"wrapper": name, "until": reset, "reset_known": True}
+            try:
+                save_cache({name: quota_entry})
+            except RuntimeError as e:
+                _err(str(e))
+                sys.exit(1)
+            cache[name] = quota_entry
+            _event("skip", f"{name}: skip (cota ate {reset:g})", executor=name, reason="cota", until=reset)
+            indisponiveis.append((name, "cota", reset))
+            continue
+
+        # Reserva atômica: chamadas simultâneas não disputam a mesma vaga.
+        reserva = availability.reserve(name, _state_dir())
+        if reserva is False:
+            _event("skip", f"{name}: skip (ocupado)", executor=name, reason="ocupado")
+            indisponiveis.append((name, "ocupado", None))
+            continue
 
         iso_t0 = time.time()
         snap_before = None
@@ -1816,9 +1860,11 @@ def _main_impl(argv=None):
                 rc, stdout_data, stderr_data, timed_out = run_wrapper(
                     argv_list, exec_cwd, exec_prompt, budget, **iso_kwargs)
             finally:
+                availability.release(reserva)
                 _iso_end(attempt, allowed)
         except FileNotFoundError:
             _event("skip", f"{name}: skip (wrapper ausente)", executor=name, reason="ausente")
+            indisponiveis.append((name, "ausente", None))
             continue
         except RuntimeError as e:
             _err(str(e))
@@ -1939,7 +1985,10 @@ def _main_impl(argv=None):
                 if snap_after != snap_before:
                     _err("aviso: arquivos autorizados alterados apos falha rc75; parando sem fallback")
                     sys.exit(1)
-            _event("fallback", f"{name}: rc=75, fallback", executor=name, rc=75, reason="cota")
+            motivo_rc75 = "fila" if admission_busy else "cota"
+            _event("fallback", f"{name}: rc=75, fallback", executor=name, rc=75, reason=motivo_rc75)
+            indisponiveis.append((name, motivo_rc75,
+                                  None if admission_busy else quota_entry["until"]))
             if _LOG_FAILED:
                 _note_log_failure()
                 sys.exit(1)
@@ -2002,6 +2051,12 @@ def _main_impl(argv=None):
         _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
     if had_timeout:
         _exit_timeout("erro: todos os workers indisponiveis ou com timeout", detail="todos indisponiveis ou com timeout")
+    partes = []
+    for nome, motivo, until in indisponiveis:
+        quando = f" ate {datetime.fromtimestamp(until).strftime('%H:%M')}" if until is not None else ""
+        partes.append(f"{nome} {motivo}{quando}")
+    if partes:
+        _err("worker-ask: nenhum worker disponivel agora: " + "; ".join(partes))
     _event("stop", "erro: todos os workers indisponiveis", rc=75, detail="nenhum worker disponivel")
     sys.exit(75)
 

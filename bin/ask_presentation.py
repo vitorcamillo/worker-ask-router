@@ -54,7 +54,8 @@ MODE_LABELS = {
     "review": "revisão",
     "consulta": "consulta",
 }
-REASONS = {"cooldown": "em espera", "ausente": "ausente", "cota": "cota", "timeout": "timeout"}
+REASONS = {"cooldown": "em espera", "ausente": "ausente", "cota": "cota", "timeout": "timeout",
+           "ocupado": "ocupado", "fila": "fila cheia"}
 DIRECTIVE_PREFIX = b"worker-ask: timeout sem entrega"
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 COLORS = {"head": "1", "ok": "32", "err": "31", "warn": "33", "dim": "2", "directive": "1;33"}

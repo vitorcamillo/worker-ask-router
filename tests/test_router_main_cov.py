@@ -524,6 +524,8 @@ def test_rc75_falls_back_and_caches_unknown_cooldown(cov_env, monkeypatch, capsy
     entry = wr.load_cache()["zcode-worker"]
     assert entry["blocked_reason"] == "quota"
     assert entry["reset_known"] is False
+    fallbacks = [a for a in wr._RUN["attempts"] if a.get("event") == "fallback"]
+    assert fallbacks and fallbacks[-1]["reason"] == "cota"
     assert [r["name"] for r in records(cov_env)] == ["zcode-worker", "opencode-ask"]
 
 
@@ -557,6 +559,8 @@ def test_rc75_admission_busy_does_not_touch_cache(cov_env, monkeypatch):
     argv = base_args(cov_env, "--no-muse")
     assert run_main(argv) == 0
     assert wr.load_cache() == {}
+    fallbacks = [a for a in wr._RUN["attempts"] if a.get("event") == "fallback"]
+    assert fallbacks and fallbacks[-1]["reason"] == "fila"
 
 
 def test_rc75_log_failure_exits_1(cov_env, monkeypatch, capsys):

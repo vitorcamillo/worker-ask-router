@@ -51,6 +51,8 @@ def chain(tmp_path):
         if not k.startswith(("ASK_", "WORKER_ASK_", "FAKE_")) and k != "NO_COLOR"
     }
     env.update(PATH=str(bin_dir), XDG_STATE_HOME=str(tmp_path / "state"), WORKER_ASK_MIN_TIMEOUT="0")
+    # Sonda de vagas desligada: o teste não pode depender dos workers reais da máquina.
+    env.update(WORKER_ASK_SLOT_PROBE="0")
     env.update(HOME=str(tmp_path / "home"), CODEX_HOME=str(tmp_path / "codex"),
                CLAUDE_CONFIG_DIR=str(tmp_path / "claude"))
     return {"env": env, "work": work, "tmp": tmp_path}

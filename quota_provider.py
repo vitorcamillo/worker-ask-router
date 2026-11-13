@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import stat
 import subprocess
@@ -76,6 +77,36 @@ def start_plan_free(now=None):
     return _start_plan_until(time.time() if now is None else now) is None
 
 
+def _muse_reset(now, budget):
+    """Cota do Muse por `muse usage --json` (sem turno de modelo)."""
+    muse = shutil.which("muse")
+    if not muse:
+        return None
+    try:
+        proc = subprocess.run(
+            [muse, "usage", "--json"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=min(6.0, budget),
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if proc.returncode or len(proc.stdout) > MAX_BYTES:
+        return None
+    allowance = json.loads(proc.stdout).get("allowance")
+    if not isinstance(allowance, dict):
+        return None
+    windows = []
+    for key in ("window", "weekly"):
+        win = allowance.get(key)
+        if isinstance(win, dict):
+            ms = win.get("resetsAtMs")
+            reset = ms / 1000 if isinstance(ms, (int, float)) else None
+            windows.append({"pct": win.get("usedPercent"), "reset": reset})
+    return _blocked_until(windows, now)
+
+
 def _query_plan_reset(wrapper, now, budget):
     """Retorna reset comprovado ou None (disponibilidade desconhecida)."""
     if budget <= 0:
@@ -108,6 +139,8 @@ def _query_plan_reset(wrapper, now, budget):
                 ],
                 now,
             )
+        if wrapper == "muse-ask":
+            return _muse_reset(now, budget)
         if wrapper not in ("zcode-worker", "codex-ask", "codex-terra"):
             return None
         source = Path.home() / ".local/bin/ask-limites-json"

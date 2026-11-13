@@ -251,3 +251,48 @@ def test_cached_cooldown_ignored_with_busy_marker(fake_env, monkeypatch, reason)
     w = _stale_zcode_entry()
     assert _first_called(fake_env) == "zcode-worker"
     assert "zcode-worker" not in w.load_cache()
+
+
+def _muse_fake(monkeypatch, tmp_path, corpo, rc=0):
+    import quota_provider as qp
+
+    fake = tmp_path / "muse"
+    fake.write_text("#!/bin/sh\ncat <<'X'\n" + corpo + "\nX\nexit " + str(rc) + "\n")
+    fake.chmod(0o755)
+    monkeypatch.setattr(qp.shutil, "which", lambda _n: str(fake))
+    return qp
+
+
+def test_muse_cota_esgotada_bloqueia_ate_o_reset(monkeypatch, tmp_path):
+    now = 1_000_000.0
+    corpo = (
+        '{"allowance":{"window":{"resetsAtMs":%d,"usedPercent":100},'
+        '"weekly":{"resetsAtMs":%d,"usedPercent":73}}}'
+        % ((now + 600) * 1000, (now + 9000) * 1000)
+    )
+    qp = _muse_fake(monkeypatch, tmp_path, corpo)
+    assert qp.query_reset("muse-ask", now) == now + 600
+
+
+def test_muse_com_cota_fica_livre(monkeypatch, tmp_path):
+    now = 1_000_000.0
+    corpo = '{"allowance":{"window":{"resetsAtMs":%d,"usedPercent":20}}}' % (
+        (now + 600) * 1000
+    )
+    qp = _muse_fake(monkeypatch, tmp_path, corpo)
+    assert qp.query_reset("muse-ask", now) is None
+
+
+def test_muse_falha_ou_ausente_fica_desconhecido(monkeypatch, tmp_path):
+    now = 1_000_000.0
+    assert _muse_fake(monkeypatch, tmp_path, "{}", rc=1).query_reset("muse-ask", now) is None
+    assert _muse_fake(monkeypatch, tmp_path, "nao-json").query_reset("muse-ask", now) is None
+    assert _muse_fake(monkeypatch, tmp_path, '{"allowance":3}').query_reset("muse-ask", now) is None
+    qp = _muse_fake(monkeypatch, tmp_path, "{}")
+    monkeypatch.setattr(qp.shutil, "which", lambda _n: None)
+    assert qp.query_reset("muse-ask", now) is None
+    monkeypatch.setattr(qp.shutil, "which", lambda _n: "/x")
+    def lento(*a, **k):
+        raise qp.subprocess.TimeoutExpired("muse", 1)
+    monkeypatch.setattr(qp.subprocess, "run", lento)
+    assert qp.query_reset("muse-ask", now) is None
