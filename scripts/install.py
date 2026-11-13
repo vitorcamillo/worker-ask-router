@@ -20,7 +20,7 @@ AUXILIARIES = ("ask_presentation.py", "zcode-cli", "zcode_headless_admit.py", "a
 
 def entries(repo: Path, home: Path):
     result = [(repo / "worker_router.py", home / ".local/bin/worker-ask", False)]
-    result.extend((repo / name, home / ".local/bin" / name, False) for name in ("quota_reset.py", "quota_provider.py"))
+    result.extend((repo / name, home / ".local/bin" / name, False) for name in ("quota_reset.py", "quota_provider.py", "worker_isolation.py"))
     result.extend((repo / "bin" / name, home / ".local/bin" / name, False)
                   for name in WRAPPERS + AUXILIARIES)
     result.append((repo / "bin/zcode-worker", home / ".local/bin/zcode-worker", True))

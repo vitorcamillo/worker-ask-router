@@ -42,6 +42,7 @@ _INTERRUPTED = False
 # Log JSONL de execucoes (runs.jsonl): uma linha por execucao que chega a cadeia.
 # Nunca recebe prompt, spec, stdout ou stderr dos workers, so metricas.
 _RUN = None
+_ISO = None  # isolamento da invocação: {"wi": módulo, "deps": Deps, "session": Session}; None = direto
 _RUN_T0 = None
 _RUN_WRITTEN = False
 RUNS_LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -527,6 +528,12 @@ def _stats_summary():
             duration = rec.get("duration_s")
             if isinstance(duration, (int, float)) and not isinstance(duration, bool):
                 slot["_durations"].append(duration)
+            if rec.get("isolation") == "worktree":
+                slot["isolated_runs"] = slot.get("isolated_runs", 0) + 1
+            for campo, chave in (("sync_conflicts", "sync_conflict_runs"), ("state_fallbacks", "state_fallback_runs")):
+                valor = rec.get(campo)
+                if isinstance(valor, int) and not isinstance(valor, bool) and valor > 0:
+                    slot[chave] = slot.get(chave, 0) + 1
             tentativas = rec.get("out_of_scope_attempts")
             por_tentativa = (
                 [t for t in tentativas if isinstance(t, dict) and "out_of_scope" in t]
@@ -981,6 +988,27 @@ _ARVORE_MAX_CAMINHOS = 5000
 _ARVORE_MAX_BYTES = 8 * 1024 * 1024
 
 
+def _parse_status_z(raw):
+    """Caminhos (bytes, relativos ao toplevel) de `git status --porcelain=v1 -z`.
+
+    Cada registro é `XY<espaço>caminho\\0`; rename/cópia traz a origem no próximo token.
+    """
+    rels = []
+    tokens = raw.split(b"\x00")
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if not tok or len(tok) < 4 or tok[2:3] != b" ":
+            continue
+        rels.append(tok[3:])
+        if tok[0:1] in (b"R", b"C") or tok[1:2] in (b"R", b"C"):
+            if i < len(tokens) and tokens[i]:
+                rels.append(tokens[i])
+            i += 1
+    return rels
+
+
 def _tree_fingerprint(cwd):
     """Impressão dos caminhos sujos do git; None quando não dá para avaliar.
 
@@ -1004,20 +1032,7 @@ def _tree_fingerprint(cwd):
                                      capture_output=True, timeout=15, env=env)
         if proc_estado.returncode != 0:
             return None
-        # Cada registro é `XY<espaço>caminho\0`; rename/cópia traz a origem no próximo token.
-        rels = []
-        tokens = proc_estado.stdout.split(b"\x00")
-        i = 0
-        while i < len(tokens):
-            tok = tokens[i]
-            i += 1
-            if not tok or len(tok) < 4 or tok[2:3] != b" ":
-                continue
-            rels.append(tok[3:])
-            if tok[0:1] in (b"R", b"C") or tok[1:2] in (b"R", b"C"):
-                if i < len(tokens) and tokens[i]:
-                    rels.append(tokens[i])
-                i += 1
+        rels = _parse_status_z(proc_estado.stdout)
         if len(rels) > _ARVORE_MAX_CAMINHOS:
             return None
         saida = {}
@@ -1174,12 +1189,14 @@ def _safe_failure_marker(stderr_data):
     return (MARKER + str(reset)).encode() if reset is not None else b""
 
 
-def run_wrapper(argv, cwd, prompt_bytes, timeout):
+def run_wrapper(argv, cwd, prompt_bytes, timeout, isolated=False):
     global _CURRENT_PROC
     deadline = time.monotonic() + timeout
     env = {k: v for k, v in os.environ.items() if k not in ("MUSE_ASK_MODEL", "MUSE_ASK_EFFORT", "ASK_PRESENTATION_FD")}
     env["WORKER_ASK_ACTIVE"] = "1"
     env["WORKER_ASK_QUOTA_HELPER"] = str(Path(__file__).resolve().with_name("quota_reset.py"))
+    if isolated:
+        env["WORKER_ASK_ISOLATED"] = "1"
     with contextlib.ExitStack() as stack:
         stdin_tmp, stdout_tmp, stderr_tmp = [
             stack.enter_context(tempfile.TemporaryFile()) for _ in range(3)
@@ -1275,6 +1292,196 @@ def build_argv(name, path, mode, cwd):
     return [path, "--cwd", cwd_abs]
 
 
+def _iso_deps(wi):
+    return wi.Deps(state_dir=_state_dir, is_sensitive=_is_sensitive, snapshot_allowed=snapshot_allowed,
+                   parse_status=_parse_status_z, max_file_bytes=MAX_SNAPSHOT_BYTES,
+                   max_paths=_ARVORE_MAX_CAMINHOS)
+
+
+def _iso_requested(cwd, mode):
+    """Módulo de isolamento quando esta invocação deve rodar isolada; None caso contrário."""
+    explicit = os.environ.get("WORKER_ASK_ISOLATION", "").strip().lower()
+    try:
+        import worker_isolation as wi
+    except ImportError:
+        if explicit in ("write", "all"):
+            _err("erro: isolamento pedido mas worker_isolation.py ausente")
+            sys.exit(1)
+        return None
+    except Exception:
+        # Módulo quebrado nunca derruba a execução direta; só para se o isolamento foi pedido.
+        if explicit in ("write", "all"):
+            _err("erro: isolamento pedido mas worker_isolation.py invalido")
+            sys.exit(1)
+        _err("aviso: worker_isolation.py invalido; seguindo sem isolamento")
+        return None
+    level = wi.resolve_mode(cwd)
+    if level == "all" or (level == "write" and mode == "write"):
+        return wi
+    return None
+
+
+def _iso_direct(reason):
+    """Registra que a execução segue sem isolamento; com STRICT, para com rc 1."""
+    if _RUN is not None:
+        _RUN["isolation"] = "none"
+        _RUN["isolation_reason"] = reason
+    if os.environ.get("WORKER_ASK_ISOLATION_STRICT") == "1":
+        _err(f"erro: isolamento indisponivel ({reason}) com WORKER_ASK_ISOLATION_STRICT=1")
+        sys.exit(1)
+
+
+def _iso_start(mode, cwd, allowed, deadline):
+    """Abre a sessão de isolamento da invocação, se ligada (define _ISO)."""
+    global _ISO
+    wi = _iso_requested(cwd, mode)
+    if wi is None:
+        return
+    try:
+        ensure_state_dir(create=True)
+    except RuntimeError as e:
+        _err(str(e))
+        sys.exit(1)
+    deps = _iso_deps(wi)
+    try:
+        session = wi.open_session(cwd, allowed, _RUN["run_id"], deps, deadline=deadline)
+    except wi.DirectMode as e:
+        _iso_direct(e.reason)
+        return
+    except wi.IsolationError as e:
+        _err(f"erro: {e}")
+        sys.exit(1)
+    _ISO = {"wi": wi, "deps": deps, "session": session}
+    _RUN["isolation"] = "worktree"
+
+
+def _iso_begin(cwd_arg, allowed, prompt_bytes):
+    """Prepara o slot para uma tentativa; None em modo direto."""
+    global _ISO
+    if _ISO is None:
+        return None
+    wi, deps, session = _ISO["wi"], _ISO["deps"], _ISO["session"]
+    try:
+        prep = wi.prepare(session, allowed, deps)
+    except wi.DirectMode as e:
+        wi.close_session(session)
+        _ISO = None
+        _iso_direct(e.reason)
+        return None
+    except wi.IsolationError as e:
+        _err(f"erro: {e}")
+        sys.exit(1)
+    except RuntimeError:
+        _err("erro: snapshot falhou")
+        sys.exit(1)
+    texto = (wi.isolation_notice(session).encode("utf-8") + b"\n"
+             + wi.rewrite_prompt(prompt_bytes, session, cwd_arg))
+    if len(texto) > MAX_INPUT_BYTES:
+        _err("erro: prompt excede 64KiB apos isolamento")
+        sys.exit(1)
+    _RUN["isolation_prep_s"] = round(_RUN.get("isolation_prep_s", 0.0) + prep.prep_s, 3)
+    _RUN["overlay_files"] = prep.overlay_files
+    try:
+        fp_before = _tree_fingerprint(session.slot_cwd)
+    except Exception:
+        fp_before = None
+    return {"prep": prep, "cwd": session.slot_cwd, "prompt": texto,
+            "fp_before": fp_before, "fp_after": None, "sync": None}
+
+
+def _iso_end(attempt, allowed):
+    """Devolve os arquivos autorizados do slot para a árvore real (roda em finally)."""
+    if attempt is None or _ISO is None or attempt["sync"] is not None:
+        return
+    attempt["sync"] = _ISO["wi"].sync_back(_ISO["session"], allowed, attempt["prep"], _ISO["deps"])
+
+
+def _iso_report(attempt, name, mode, cwd, allowed, tree_before, since_ts, oos_total, oos):
+    """Pós-tentativa isolada: guarda descartados, vigia a árvore real e trata conflito."""
+    wi, deps, session = _ISO["wi"], _ISO["deps"], _ISO["session"]
+    sync = attempt["sync"]
+    try:
+        if oos_total:
+            info = wi.save_rejected(session, oos, deps)
+            _RUN["oos_discarded"] = _RUN.get("oos_discarded", 0) + oos_total
+            onde = f"copia em {info.dir}" if info.dir else "sem copia"
+            nomes = ", ".join(oos[:10])
+            if mode == "plan":
+                _err(f"aviso: {name} alterou {oos_total} arquivo(s) em modo plan; NAO aplicados: {nomes} ({onde})")
+            else:
+                _err(f"aviso: {name} alterou {oos_total} arquivo(s) fora do escopo; NAO aplicados: {nomes} ({onde})")
+        _RUN["sync_applied"] = _RUN.get("sync_applied", 0) + len(sync.applied)
+        _RUN["sync_conflicts"] = _RUN.get("sync_conflicts", 0) + len(sync.conflicts)
+        # Vigia da árvore real: desconta o que outras invocações devolveram na janela.
+        real = _out_of_scope_detail(tree_before, _tree_fingerprint(cwd), cwd, allowed)
+        if real is not None and real[0]:
+            outros = wi.synced_by_others(session, since_ts, deps)
+            sobra = [rel for rel in real[1]
+                     if os.path.normpath(os.path.join(cwd, rel)) not in outros
+                     and ".wa-sync-" not in os.path.basename(rel)]
+            if sobra:
+                _RUN["real_tree_changed"] = _RUN.get("real_tree_changed", 0) + len(sobra)
+                _err("aviso: arvore real mudou durante a execucao (edicao concorrente ou worker fora da copia)")
+    except Exception:
+        pass
+    if sync is not None and sync.conflicts:
+        _err("aviso: conflito na devolucao; NAO aplicados: " + ", ".join(sync.conflicts[:10])
+             + f" (copia do worker em {session.slot_cwd})")
+        _event("stop", f"{name}: conflito na devolucao", executor=name, rc=1, detail="conflito")
+        sys.exit(1)
+
+
+# Executores sem shell: fora do slot não têm como deixar efeito no repositório.
+# Lista fixa de propósito (não configurável): codex-ask e claude-ask têm shell.
+_STATE_FALLBACK_EXECUTORS = ("zcode-worker", "muse-ask", "opencode-ask")
+
+
+def _iso_no_effect(attempt, name, mode, cwd, allowed, snap_before, marker, deadline):
+    """True quando a tentativa isolada falhou sem deixar efeito e a cadeia pode seguir.
+
+    Decide só por estado conferido (cópia e árvore real), nunca por texto de erro.
+    """
+    if attempt is None or _ISO is None or mode != "write":
+        return False
+    if os.environ.get("WORKER_ASK_STATE_FALLBACK") != "1" or name not in _STATE_FALLBACK_EXECUTORS:
+        return False
+    if marker == b"launcher_incompatible_effects" or time.monotonic() >= deadline:
+        return False
+    sync = attempt["sync"]
+    if sync is None or sync.applied or sync.conflicts:
+        return False
+    if attempt["fp_before"] is None or attempt["fp_after"] is None:
+        return False
+    if attempt["fp_before"] != attempt["fp_after"]:
+        return False
+    try:
+        if snapshot_allowed(attempt["cwd"], allowed) != attempt["prep"].snap_slot_before:
+            return False
+        return snapshot_allowed(cwd, allowed) == snap_before
+    except RuntimeError:
+        return False
+
+
+def _iso_shutdown():
+    """Solta o slot da invocação; chamado no finally de main()."""
+    global _ISO
+    iso, _ISO = _ISO, None
+    if iso is not None:
+        try:
+            iso["wi"].close_session(iso["session"])
+        except Exception:
+            pass
+
+
+def _iso_status():
+    """Slots de isolamento para --status; lista vazia sem módulo ou sem slots."""
+    try:
+        import worker_isolation as wi
+        return wi.list_slots(_iso_deps(wi))
+    except Exception:
+        return []
+
+
 def _main_impl(argv=None):
     global _LOG_FD
     parser = argparse.ArgumentParser(prog="worker-ask")
@@ -1294,6 +1501,8 @@ def _main_impl(argv=None):
     parser.add_argument("--retry-exhausted", action="store_true")
     parser.add_argument("--allowed-file", action="append", default=[])
     parser.add_argument("--log", help="grava stdout+stderr e a linha final exit=N neste arquivo")
+    parser.add_argument("--isolation-gc", action="store_true",
+                        help="remove slots de isolamento sem uso e copias rejeitadas antigas, e sai")
     # --help sai dentro de parse_args, antes da abertura normal do --log:
     # abre o log antes e registra o texto de ajuda nele.
     raw_argv = list(sys.argv[1:] if argv is None else argv)
@@ -1349,6 +1558,9 @@ def _main_impl(argv=None):
                 remaining = max(0, v["until"] - now)
                 snap[k] = {**v, "ttl_remaining": remaining}
         out = {"state_dir": str(_state_dir()), "cache": snap}
+        slots = _iso_status()
+        if slots:
+            out["isolation_slots"] = slots
         status_text = json.dumps(out) + "\n"
         sys.stdout.write(status_text)
         if not _log_write(status_text.encode("utf-8", "replace")):
@@ -1378,6 +1590,19 @@ def _main_impl(argv=None):
     if os.environ.get("WORKER_ASK_ACTIVE") == "1":
         _err("erro: delegacao recursiva de worker bloqueada")
         sys.exit(2)
+
+    if args.isolation_gc:
+        try:
+            import worker_isolation as wi
+        except ImportError:
+            _err("erro: worker_isolation.py ausente")
+            sys.exit(1)
+        gc_text = json.dumps(wi.gc(_iso_deps(wi))) + "\n"
+        sys.stdout.write(gc_text)
+        if not _log_write(gc_text.encode("utf-8", "replace")):
+            _note_log_failure()
+            sys.exit(1)
+        sys.exit(0)
 
     # validate timeout
     if not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -1518,6 +1743,7 @@ def _main_impl(argv=None):
     start = _RUN_T0
     deadline = start + args.timeout
     had_timeout = False
+    _iso_start(args.mode, cwd, allowed, deadline)
 
     for name, orch in chain:
         if time.monotonic() >= deadline:
@@ -1554,6 +1780,7 @@ def _main_impl(argv=None):
                 _event("skip", f"{name}: skip (cota ate {reset:g})", executor=name, reason="cota", until=reset)
                 continue
 
+        iso_t0 = time.time()
         snap_before = None
         if allowed:
             try:
@@ -1567,6 +1794,9 @@ def _main_impl(argv=None):
             tree_before = _tree_fingerprint(cwd)
         except Exception:
             tree_before = None
+        attempt = _iso_begin(args.cwd, allowed, prompt_bytes)
+        exec_cwd = attempt["cwd"] if attempt is not None else cwd
+        exec_prompt = attempt["prompt"] if attempt is not None else prompt_bytes
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1576,11 +1806,17 @@ def _main_impl(argv=None):
         queue_extra = _zcode_queue_timeout() if name == "zcode-worker" else 0.0
         budget = min(args.step_timeout + queue_extra, remaining)
 
-        argv_list = build_argv(name, path, args.mode, cwd)
+        argv_list = build_argv(name, path, args.mode, exec_cwd)
         model = argv_list[argv_list.index("--model") + 1] if "--model" in argv_list else None
         _emit_executor_start(name, args.mode, model)
         try:
-            rc, stdout_data, stderr_data, timed_out = run_wrapper(argv_list, cwd, prompt_bytes, budget)
+            try:
+                # Sem isolamento a chamada fica idêntica à anterior (4 argumentos posicionais).
+                iso_kwargs = {"isolated": True} if attempt is not None else {}
+                rc, stdout_data, stderr_data, timed_out = run_wrapper(
+                    argv_list, exec_cwd, exec_prompt, budget, **iso_kwargs)
+            finally:
+                _iso_end(attempt, allowed)
         except FileNotFoundError:
             _event("skip", f"{name}: skip (wrapper ausente)", executor=name, reason="ausente")
             continue
@@ -1592,10 +1828,16 @@ def _main_impl(argv=None):
         # apos fallback nao pode herdar executor/tokens da tentativa anterior.
         _record_run_metrics(name, stdout_data, allowed, cwd, snap_before)
 
+        oos_total = None
+        oos = None
         # Detecção fora do escopo: métrica e aviso; nunca muda rc, stdout ou fluxo.
         try:
             if _RUN is not None:
-                detail = _out_of_scope_detail(tree_before, _tree_fingerprint(cwd), cwd, allowed)
+                if attempt is not None:
+                    attempt["fp_after"] = _tree_fingerprint(exec_cwd)
+                    detail = _out_of_scope_detail(attempt["fp_before"], attempt["fp_after"], exec_cwd, allowed)
+                else:
+                    detail = _out_of_scope_detail(tree_before, _tree_fingerprint(cwd), cwd, allowed)
                 oos_total = detail[0] if detail is not None else None
                 oos = detail[1] if detail is not None else None
                 # Persiste por tentativa e agrega: fallback limpo não apaga
@@ -1620,7 +1862,7 @@ def _main_impl(argv=None):
                             if arquivo not in arquivos:
                                 arquivos.append(arquivo)
                 _RUN["out_of_scope_files"] = arquivos[:20]
-                if oos_total:
+                if oos_total and attempt is None:
                     nomes = ", ".join(oos[:10])
                     if args.mode == "plan":
                         _err(f"aviso: {name} alterou {oos_total} arquivo(s) em modo plan (só leitura): {nomes} (pode incluir edição concorrente)")
@@ -1628,6 +1870,9 @@ def _main_impl(argv=None):
                         _err(f"aviso: {name} alterou {oos_total} arquivo(s) fora do escopo (--allowed-file): {nomes} (pode incluir edição concorrente)")
         except Exception:
             pass
+
+        if attempt is not None:
+            _iso_report(attempt, name, args.mode, cwd, allowed, tree_before, iso_t0, oos_total, oos)
 
         if timed_out or rc == 124:
             # Circuito aberto: nao repetir automaticamente um executor sem resposta.
@@ -1648,6 +1893,13 @@ def _main_impl(argv=None):
             except RuntimeError as e:
                 _err(str(e))
                 sys.exit(1)
+            if _iso_no_effect(attempt, name, args.mode, cwd, allowed, snap_before, stderr_data, deadline):
+                # Cópia isolada intacta: o worker sem shell não deixou efeito; a cadeia segue.
+                had_timeout = True
+                _RUN["state_fallbacks"] = _RUN.get("state_fallbacks", 0) + 1
+                _event("fallback", f"{name}: rc=timeout, fallback (sem efeito)", executor=name, rc=124,
+                       reason="sem_efeito")
+                continue
             if args.mode != "plan":
                 # write: snapshot igual nao exclui efeitos externos do worker morto.
                 _exit_timeout(f"{name}: rc=124 (timeout); parando sem fallback", name, "escrita sem fallback")
@@ -1719,6 +1971,16 @@ def _main_impl(argv=None):
                     continue
             if launcher:
                 _err("zcode-worker: launcher de autenticacao incompativel com o bundle; fallback bloqueado (rc=1)")
+            if rc == 1 and _iso_no_effect(attempt, name, args.mode, cwd, allowed, snap_before, stderr_data,
+                                          deadline):
+                # Cópia isolada intacta: o worker sem shell não deixou efeito; a cadeia segue.
+                _RUN["state_fallbacks"] = _RUN.get("state_fallbacks", 0) + 1
+                _event("fallback", f"{name}: rc=1, fallback (sem efeito)", executor=name, rc=1,
+                       reason="sem_efeito")
+                if _LOG_FAILED:
+                    _note_log_failure()
+                    sys.exit(1)
+                continue
             _event("stop", f"{name}: rc={rc}", executor=name, rc=rc, detail="falha")
             sys.exit(rc if rc > 0 else 1)
 
@@ -1781,6 +2043,7 @@ def main(argv=None):
             if _RUN is not None:
                 _write_run(0)
     finally:
+        _iso_shutdown()
         signal.signal(signal.SIGINT, prev_int)
         signal.signal(signal.SIGTERM, prev_term)
 
