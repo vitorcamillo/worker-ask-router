@@ -197,18 +197,43 @@ def reserve(name, state_dir):
         return None
     if not probe.get("free"):
         return False
+    flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+    base = os.path.join(os.fspath(state_dir), f"vaga-{name}")
+    mestre = livre = None
     try:
+        mestre = os.open(base + ".lock", flags, 0o600)
+        fcntl.flock(mestre, fcntl.LOCK_EX)  # serializa a decisão entre chamadas
+        pendentes, agora = 0, time.time()
         for i in range(1, int(probe["max"]) + 1):
-            path = os.path.join(os.fspath(state_dir), f"vaga-{name}-{i}.lock")
-            fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            fd = os.open(f"{base}-{i}.lock", flags, 0o600)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
+                # Reserva recente ainda fora da sonda: soma à ocupação real.
+                feita = _numero_txt(os.pread(fd, 32, 0))
+                pendentes += feita is None or agora - feita < RESERVA_PENDENTE
                 os.close(fd)
                 continue
-            return fd
-        return False
+            livre = fd if livre is None else (os.close(fd) or livre)
+        if livre is None or int(probe["active"]) + pendentes >= int(probe["max"]):
+            release(livre)
+            return False
+        os.ftruncate(livre, 0)
+        os.pwrite(livre, repr(agora).encode(), 0)
+        return livre
     except Exception:
+        return None
+    finally:
+        release(mestre)
+
+
+RESERVA_PENDENTE = 15.0  # s até o worker reservado aparecer na sonda de vagas
+
+
+def _numero_txt(raw):
+    try:
+        return float(raw.decode())
+    except (ValueError, UnicodeError):
         return None
 
 

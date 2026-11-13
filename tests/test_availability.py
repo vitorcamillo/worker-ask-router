@@ -246,3 +246,24 @@ def test_reserve_sem_vaga_sem_sonda_e_erro(tmp_path, monkeypatch):
     assert av.reserve("muse-ask", tmp_path) is None
     monkeypatch.setattr(av, "slots", lambda nome: {"active": 0, "max": 1, "free": True})
     assert av.reserve("zcode-worker", tmp_path / "ausente") is None  # diretório inexistente
+
+
+def test_reserve_conta_ocupacao_externa(tmp_path, monkeypatch):
+    # 1 execução externa ativa + teto 2: só cabe UMA reserva nova.
+    monkeypatch.setattr(av, "slots", lambda nome: {"active": 1, "max": 2, "free": True})
+    a = av.reserve("zcode-worker", tmp_path)
+    assert isinstance(a, int) and not isinstance(a, bool)
+    assert av.reserve("zcode-worker", tmp_path) is False
+    # Reserva antiga já aparece na sonda: não é contada duas vezes.
+    os.ftruncate(a, 0)
+    os.pwrite(a, repr(time.time() - av.RESERVA_PENDENTE - 1).encode(), 0)
+    monkeypatch.setattr(av, "slots", lambda nome: {"active": 1, "max": 3, "free": True})
+    b = av.reserve("zcode-worker", tmp_path)
+    assert isinstance(b, int) and not isinstance(b, bool)
+    # Carimbo ilegível conta como pendente (conservador).
+    os.ftruncate(b, 0)
+    os.pwrite(b, b"\xff", 0)
+    monkeypatch.setattr(av, "slots", lambda nome: {"active": 2, "max": 3, "free": True})
+    assert av.reserve("zcode-worker", tmp_path) is False
+    av.release(a)
+    av.release(b)
