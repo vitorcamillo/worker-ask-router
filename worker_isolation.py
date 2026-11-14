@@ -540,7 +540,11 @@ def _validate_slot_symlinks(session: Session, permitir: frozenset = frozenset())
         raise IsolationError("isolamento: falha ao varrer symlinks do slot") from erro
 
     for base, dirs, files in os.walk(session.slot, followlinks=False, onerror=_negar):
-        for nome in dirs + files:
+        nomes = dirs + files
+        # Link nunca é percorrido: sai de dirs para o walk não descer num
+        # caminho que a varredura acabou de remover.
+        dirs[:] = [d for d in dirs if not os.path.islink(os.path.join(base, d))]
+        for nome in nomes:
             caminho = os.path.join(base, nome)
             if not os.path.islink(caminho):
                 continue
