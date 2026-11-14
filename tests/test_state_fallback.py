@@ -393,3 +393,7 @@ def test_modulo_ausente_com_marcador_ou_strict_exige_parar(tmp_path, monkeypatch
     monkeypatch.setitem(sys.modules, "worker_isolation", None)  # import falha
     with pytest.raises(SystemExit):
         wr._iso_requested(str(sub), "write")
+    # `off` na variável desliga mesmo com marcador, STRICT e módulo ausente.
+    monkeypatch.setenv("WORKER_ASK_ISOLATION", "off")
+    monkeypatch.setenv("WORKER_ASK_ISOLATION_STRICT", "1")
+    assert wr._iso_requested(str(sub), "write") is None

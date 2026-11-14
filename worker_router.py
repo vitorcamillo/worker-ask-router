@@ -1407,6 +1407,8 @@ def _iso_exigido_sem_modulo(cwd):
 def _iso_requested(cwd, mode):
     """Módulo de isolamento quando esta invocação deve rodar isolada; None caso contrário."""
     explicit = os.environ.get("WORKER_ASK_ISOLATION", "").strip().lower()
+    if explicit == "off":
+        return None  # a variável vence marcador e STRICT, com ou sem o módulo
     try:
         import worker_isolation as wi
     except ImportError:
