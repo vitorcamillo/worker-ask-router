@@ -707,6 +707,9 @@ def _symlink_foge(slot_root: str, dst: str, alvo: str) -> bool:
     return not dentro
 
 
+_MAX_ELOS = 40  # mesmo teto de expansões de symlink do kernel
+
+
 def _resolve_cadeia(raiz: str, base_rel: str, alvo: str) -> Optional[str]:
     """Resolução efetiva de base_rel/alvo desde raiz seguindo elos intermediários.
 
@@ -717,7 +720,7 @@ def _resolve_cadeia(raiz: str, base_rel: str, alvo: str) -> Optional[str]:
     """
     atual = raiz
     pendente = alvo if base_rel in ("", os.curdir) else base_rel + os.sep + alvo
-    vistos = set()
+    expansoes = 0
     while pendente:
         nome, _, pendente = pendente.partition(os.sep)
         if nome in ("", os.curdir):
@@ -734,9 +737,11 @@ def _resolve_cadeia(raiz: str, base_rel: str, alvo: str) -> Optional[str]:
         if not stat.S_ISLNK(st.st_mode):
             atual = candidato
             continue
-        if candidato in vistos:
+        # Repetir um elo não é ciclo (`a -> .` e `b -> a/a/f` terminam):
+        # como o kernel, limita o número de expansões.
+        expansoes += 1
+        if expansoes > _MAX_ELOS:
             return None  # ciclo
-        vistos.add(candidato)
         try:
             sub = os.readlink(candidato)
         except OSError:
@@ -949,8 +954,9 @@ def _sync_copy_file(session, rel, dst, agora_real, agora_slot, deps) -> bool:
         parent = os.path.dirname(dst)
         os.makedirs(parent, exist_ok=True)
         nome = f".{os.path.basename(dst)}.wa-sync-{session.run_id[:8]}.tmp"
-        tmp = os.path.join(parent, nome)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        destino_tmp = os.path.join(parent, nome)
+        fd = os.open(destino_tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        tmp = destino_tmp  # só limpa no finally o temporário que esta chamada criou
         try:
             _write_all(fd, data)
             os.fsync(fd)

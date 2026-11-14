@@ -591,3 +591,18 @@ def test_gc_remove_rejected_velho(deps):
 def test_gc_sem_diretorio_de_estado(deps):
     r = wi.gc(deps)
     assert r == {"slots_removed": 0, "rejected_removed": 0, "errors": 0}
+
+
+def test_sync_back_colisao_de_temporario_preserva_arquivo_alheio(repo, deps):
+    # O_EXCL falha no temporário que já existia: ele não é desta chamada e fica.
+    permitido = ["a.txt"]
+    s, prep = _abrir(repo, deps, permitido)
+    try:
+        alheio = repo / f".a.txt.wa-sync-{s.run_id[:8]}.tmp"
+        alheio.write_text("alheio\n", encoding="utf-8")
+        (Path(s.slot_cwd) / "a.txt").write_text("slot\n", encoding="utf-8")
+        res = wi.sync_back(s, permitido, prep, deps)
+        assert res.conflicts == ["a.txt"]
+        assert alheio.read_text(encoding="utf-8") == "alheio\n"
+    finally:
+        wi.close_session(s)

@@ -714,3 +714,16 @@ def test_prepare_revalida_symlinks_depois_dos_links_de_dependencia(repo, deps):
         assert (slot / "base.txt").is_file()
     finally:
         wi.close_session(s)
+
+
+def test_symlink_foge_elo_repetido_sem_ciclo_e_interno(tmp_path):
+    # `a -> .` e `b -> a/a/base.txt` repetem o elo mas terminam dentro do slot.
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    (slot / "base.txt").write_text("x", encoding="utf-8")
+    os.symlink(".", slot / "a")
+    assert wi._symlink_foge(str(slot), str(slot / "b"), "a/a/base.txt") is False
+    # ciclo de verdade continua recusado
+    os.symlink("c2", slot / "c1")
+    os.symlink("c1", slot / "c2")
+    assert wi._symlink_foge(str(slot), str(slot / "d"), "c1/x") is True
