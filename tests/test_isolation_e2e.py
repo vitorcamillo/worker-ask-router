@@ -158,7 +158,8 @@ def _bin(tmp_path, corpo):
 
 def _env(repo, tmp_path, bin_dir, **extra):
     env = dict(os.environ, HOME=str(tmp_path), PATH=str(bin_dir), XDG_STATE_HOME=str(tmp_path / "st"),
-               WORKER_ASK_MIN_TIMEOUT="0", ASK_PRESENTATION_ACTIVE="1", FAKE_REAL=str(repo))
+               WORKER_ASK_MIN_TIMEOUT="0", ASK_PRESENTATION_ACTIVE="1", FAKE_REAL=str(repo),
+               WORKER_ASK_SLOT_PROBE="0")
     for chave in ("ASK_PRESENTATION_FD", "WORKER_ASK_NO_MUSE", "WORKER_ASK_ISOLATION",
                   "WORKER_ASK_ISOLATION_STRICT", "WORKER_ASK_ACTIVE"):
         env.pop(chave, None)

@@ -21,6 +21,7 @@ nunca shell=True; a copia temporaria nunca toca os fontes reais.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,8 @@ PYTEST_TIMEOUT = 300
 BASELINE_TIMEOUT = 600
 COVERAGE_PYTEST_TIMEOUT = 600
 MUTATION_MIN_DEFAULT = 80.0
+# Erro de setup/teardown sai com rc 1 sem "ERROR collecting": é infraestrutura.
+_ERRO_PYTEST = re.compile(r"^ERROR |^=+ ERRORS =+$|\b\d+ errors?\b", re.M)
 
 # Abreviacoes da lista de mutantes.
 U1 = "tests/test_isolation.py"
@@ -272,7 +275,8 @@ def mutation():
                 except subprocess.TimeoutExpired:
                     print(f"BLOCK: timeout de ferramenta no mutante {name}")
                     return 2
-                if changed.returncode not in (0, 1) or "ERROR collecting" in changed.stdout:
+                if (changed.returncode not in (0, 1) or "ERROR collecting" in changed.stdout
+                        or _ERRO_PYTEST.search(changed.stdout)):
                     # rc fora de 0/1 ou erro de coleta é infraestrutura, não veredito:
                     # não vale como morte nem como sobrevivência do mutante.
                     print(f"BLOCK: falha de infraestrutura no mutante {name} (rc {changed.returncode})")

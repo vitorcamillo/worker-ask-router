@@ -71,3 +71,13 @@ def test_mutation_morto_e_sobrevivente_contam_normal(tmp_path, monkeypatch, caps
     assert relatorio["results"][0]["killed"] is True
     assert relatorio["results"][1]["killed"] is False
     assert "falha de infraestrutura" not in capsys.readouterr().out
+
+
+def test_mutation_erro_de_setup_com_rc1_bloqueia_com_rc2(tmp_path, monkeypatch, capsys):
+    # Erro de setup/teardown sai com rc 1 e sem "ERROR collecting": não é sobrevivente.
+    mod = _modulo()
+    _carregar(mod, monkeypatch, tmp_path, lambda n: _ok() if n == 1 else {
+        "returncode": 1, "stdout": "ERROR tests/test_isolation.py::x - RuntimeError\n1 error in 0.1s",
+        "stderr": ""})
+    assert mod.mutation() == 2
+    assert "falha de infraestrutura no mutante" in capsys.readouterr().out

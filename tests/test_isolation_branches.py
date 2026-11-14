@@ -973,3 +973,25 @@ def test_remove_in_slot_laco_de_symlink_e_ausente(tmp_path, monkeypatch):
 
 def test_remove_quietly_caminho_ausente_nao_levanta(tmp_path):
     assert wi._remove_quietly(str(tmp_path / "ausente.tmp")) is None
+
+
+def test_guard_slot_recusa_slot_que_e_symlink_para_outro_slot(repo, deps):
+    s = wi.open_session(str(repo), [], "run1", deps, environ={})
+    try:
+        apelido = Path(s.slot).parent / "slot-apelido"
+        os.symlink(s.slot, apelido)
+        wi.guard_slot(s.slot, s.common_dir, deps)  # o slot real continua aceito
+        with pytest.raises(wi.SlotGuardError, match="symlink"):
+            wi.guard_slot(str(apelido), s.common_dir, deps)
+    finally:
+        wi.close_session(s)
+
+
+def test_copy_regular_para_quando_origem_cresce_na_leitura(tmp_path, monkeypatch):
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"x" * 10)
+    real_read = os.read
+    monkeypatch.setattr(wi.os, "read", lambda fd, n: real_read(fd, n) + b"y" * 100
+                        if real_read is not None and n == wi._CHUNK else real_read(fd, n))
+    with pytest.raises(wi.DirectMode):
+        wi._copy_regular(str(src), str(tmp_path / "dst.bin"), 50)

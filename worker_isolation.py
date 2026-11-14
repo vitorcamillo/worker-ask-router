@@ -258,6 +258,9 @@ def _link_names(environ) -> list:
 
 def guard_slot(slot, common_dir, deps) -> None:
     """Recusa (SlotGuardError) qualquer slot fora da área de worktrees ou não correspondente."""
+    if os.path.islink(os.fspath(slot)):
+        # slot-0 -> slot-1 passaria nas conferências abaixo com a trava errada.
+        raise SlotGuardError("isolamento: slot e symlink")
     slot_real = os.path.realpath(os.fspath(slot))
     worktrees = os.path.realpath(str(Path(deps.state_dir()) / "worktrees")) + os.sep
     if not slot_real.startswith(worktrees):
@@ -592,7 +595,7 @@ def _apply_overlay(session, deps, environ):
         elif stat.S_ISREG(st.st_mode):
             _ensure_parent_dir(session.slot, dst)
             try:
-                written = _copy_regular(src, dst, deps.max_file_bytes)
+                written = _copy_regular(src, dst, min(deps.max_file_bytes, max_overlay - total))
             except FileNotFoundError:
                 _remove_in_slot(dst)
                 written = 0
@@ -673,8 +676,10 @@ def _copy_regular(src: str, dst: str, max_file_bytes: int):
                 chunk = os.read(fd, _CHUNK)
                 if not chunk:
                     break
-                _write_all(out, chunk)
                 written += len(chunk)
+                if written > max_file_bytes:  # a origem cresceu durante a leitura
+                    raise DirectMode("overlay_limit")
+                _write_all(out, chunk)
             os.fchmod(out, stat.S_IMODE(st.st_mode))
         finally:
             os.close(out)
