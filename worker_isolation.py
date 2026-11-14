@@ -879,11 +879,13 @@ def sync_back(session: Session, allowed, prep, deps) -> SyncResult:
     """
     if prep is None:
         return SyncResult([], [])
+    # A espera pela trava fica fora da máscara: outro processo parado com a
+    # trava não pode prender este sem Ctrl-C (nada foi devolvido ainda).
+    lock_fd = _sync_lock(session)
     antigo = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
     try:
         applied: list = []
         conflicts: list = []
-        lock_fd = _sync_lock(session)
         if lock_fd is None:
             conflicts.extend(allowed)  # sem exclusão mútua não há devolução segura
         else:
