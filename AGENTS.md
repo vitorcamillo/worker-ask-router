@@ -15,4 +15,5 @@
 
 - Workers sao independentes da plataforma do orquestrador: Codex pode usar Luna via roteador. Nao excluir plataforma inteira; impedir delegacao recursiva com `WORKER_ASK_ACTIVE`. Esta regra atende ao pedido explicito do usuario e prevalece sobre a exclusao antiga da home.
 
+- Ordem da cadeia: a padrao e a de baixo; o painel pode salvar outra em `~/.config/worker-ask/ordem.json` (`WORKER_ASK_ORDEM` troca o caminho; chaves `provedores` e `opencode`). So reordena: precisa ser permutacao exata dos nomes conhecidos, senao vale a padrao. Nao acrescenta nem remove executor.
 - Cadeia vigente: ZCode → Muse (padrao; opt-out por projeto via .worker-ask-no-muse/--no-muse) → OpenCode → Codex Luna → Claude Haiku. A remocao do degrau Terra que ja existia no working tree foi preservada; a cadeia atual substitui a intencao antiga do commit 07cb87c. O handler codex-terra permanece apenas por compatibilidade, sem participar do roteamento.

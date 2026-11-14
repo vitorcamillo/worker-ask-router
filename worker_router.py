@@ -1353,14 +1353,30 @@ def muse_opted_out(cwd):
         cur = parent
 
 
+_ORDEM_PADRAO = ("zcode", "muse", "opencode", "codex", "claude")
+
+
+def _ordem_provedores():
+    """Ordem salva pelo painel (ordem.json, chave "provedores"); só vale se for uma
+    permutação exata dos provedores conhecidos. Qualquer falha → ordem padrão."""
+    caminho = os.environ.get("WORKER_ASK_ORDEM") or os.path.expanduser("~/.config/worker-ask/ordem.json")
+    try:
+        with open(caminho, encoding="utf-8") as fh:
+            ordem = json.load(fh).get("provedores")
+    except (OSError, ValueError, AttributeError):
+        return _ORDEM_PADRAO
+    # Só nomes (texto): item de outro tipo quebraria o sorted em vez de cair no padrão.
+    if (isinstance(ordem, list) and all(isinstance(n, str) for n in ordem)
+            and sorted(ordem) == sorted(_ORDEM_PADRAO)):
+        return tuple(ordem)
+    return _ORDEM_PADRAO
+
+
 def wrapper_chain(orchestrator, allow_muse, mode):
     # A plataforma do orquestrador nao restringe o worker; recursao tem trava propria.
-    chain = [("zcode-worker", "zcode")]
-    if allow_muse:
-        chain.append(("muse-ask", "muse"))
-    chain.extend([("opencode-ask", "opencode"), ("codex-ask", "codex"),
-                  ("claude-ask", "claude")])
-    return chain
+    wrappers = {"zcode": "zcode-worker", "muse": "muse-ask", "opencode": "opencode-ask",
+                "codex": "codex-ask", "claude": "claude-ask"}
+    return [(wrappers[n], n) for n in _ordem_provedores() if n != "muse" or allow_muse]
 
 
 def build_argv(name, path, mode, cwd):

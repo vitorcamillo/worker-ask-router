@@ -1122,3 +1122,18 @@ def test_nested_call_rejected_before_start(fake_env):
     assert result.returncode == 2
     assert b'delegacao recursiva' in result.stderr
     assert not log.exists()
+
+
+def test_wrapper_chain_segue_ordem_do_painel(tmp_path, monkeypatch):
+    arq = tmp_path / "ordem.json"
+    monkeypatch.setenv("WORKER_ASK_ORDEM", str(arq))
+    arq.write_text('{"provedores": ["opencode", "zcode", "claude", "muse", "codex"]}')
+    assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == ["opencode", "zcode", "claude", "muse", "codex"]
+    assert [n for _, n in wr.wrapper_chain("claude", False, "write")] == ["opencode", "zcode", "claude", "codex"]
+    # Lista que não é permutação exata (falta, sobra ou repete) cai na ordem padrão.
+    for ruim in ('{"provedores": ["zcode", "zcode", "muse", "opencode", "codex"]}',
+                 '{"provedores": ["zcode", "muse", "opencode", "codex", "claude", "x"]}', "{", "[]",
+                 '{"provedores": [1, "zcode", "muse", "opencode", "codex"]}',
+                 '{"provedores": [["zcode"], "muse", "opencode", "codex", "claude"]}'):
+        arq.write_text(ruim)
+        assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == list(wr._ORDEM_PADRAO)

@@ -6,3 +6,5 @@ os.environ.setdefault("WORKER_ASK_ZCODE_QUEUE_TIMEOUT", "0.001")
 # Testes nao podem olhar processos e vagas reais da maquina: sonda de slots desligada
 # (testes de vaga fazem monkeypatch em availability.slots).
 os.environ.setdefault("WORKER_ASK_SLOT_PROBE", "0")
+# Testes usam a ordem padrao da cadeia, nunca a salva pelo painel.
+os.environ["WORKER_ASK_ORDEM"] = "/nonexistent/ordem.json"
