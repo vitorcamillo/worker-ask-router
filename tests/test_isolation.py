@@ -686,3 +686,31 @@ def test_prepare_remove_composicao_e_ciclo_versionados(repo, deps, tmp_path):
         assert not os.path.lexists(slot / "loop")
     finally:
         wi.close_session(s)
+
+
+def test_prepare_revalida_symlinks_depois_dos_links_de_dependencia(repo, deps):
+    # `b -> node_modules/../base.txt` parece interno enquanto node_modules não
+    # existe no slot; com o elo de dependência criado depois, o `..` alcança a
+    # árvore real. A revalidação posterior remove o elo que atravessa a
+    # dependência e preserva apenas o link explícito de _create_links.
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "x.js").write_text("x\n", encoding="utf-8")
+    os.symlink("node_modules/../base.txt", repo / "b")
+    os.symlink("node_modules/x.js", repo / "atraves")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "composicao com link de dependencia")
+    os.symlink("node_modules/../base.txt", repo / "u")  # mesma fuga via overlay
+    s = wi.open_session(str(repo), [], "run1", deps, environ={})
+    try:
+        info = wi.prepare(s, [], deps, environ={})
+        slot = Path(s.slot)
+        assert "node_modules" in info.links
+        assert os.path.islink(os.path.join(s.slot, "node_modules"))
+        assert os.path.realpath(os.path.join(s.slot, "node_modules")) == \
+            os.path.realpath(str(repo / "node_modules"))
+        assert not os.path.lexists(slot / "b")
+        assert not os.path.lexists(slot / "u")
+        assert not os.path.lexists(slot / "atraves")
+        assert (slot / "base.txt").is_file()
+    finally:
+        wi.close_session(s)

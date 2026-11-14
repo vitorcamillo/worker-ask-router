@@ -494,6 +494,10 @@ def _prepare_attempt(session, allowed, deps, environ, snap_before, started_ts, s
     _validate_slot_symlinks(session)
     _copy_allowed(session, allowed, deps)
     links = _create_links(session, deps, environ)
+    # O elo de dependência muda a resolução dos symlinks já validados (um
+    # `b -> node_modules/../fora.txt` interno passa a alcançar a árvore real):
+    # revalida preservando apenas os elos criados, as exceções explícitas.
+    _validate_slot_symlinks(session, set(links))
     os.makedirs(session.slot_cwd, exist_ok=True)
     snap_slot_before = deps.snapshot_allowed(session.slot_cwd, allowed)
     for rel in allowed:
@@ -519,12 +523,17 @@ def _reset_slot(session, sha: str) -> None:
             raise IsolationError("isolamento: falha ao limpar slot")
 
 
-def _validate_slot_symlinks(session: Session) -> None:
+def _validate_slot_symlinks(session: Session, permitir: frozenset = frozenset()) -> None:
     """Remove do slot todo symlink que aponte fora da cópia.
 
     O checkout repõe symlinks versionados limpos sem passar por _copy_symlink
     (que só vê o overlay): um link versionado absoluto ou em fuga daria ao
-    worker acesso a arquivos fora do slot, inclusive na árvore real.
+    worker acesso a arquivos fora do slot, inclusive na árvore real. Como
+    _create_links muda a resolução depois da varredura (`b ->
+    node_modules/../fora.txt` é interno sem node_modules e, com o elo criado,
+    alcança a árvore real), a varredura roda de novo na sequência dele:
+    `permitir` leva os caminhos relativos ao slot dos elos de dependência
+    criados, as únicas exceções explícitas.
     """
 
     def _negar(erro):
@@ -534,6 +543,8 @@ def _validate_slot_symlinks(session: Session) -> None:
         for nome in dirs + files:
             caminho = os.path.join(base, nome)
             if not os.path.islink(caminho):
+                continue
+            if os.path.relpath(caminho, session.slot) in permitir:
                 continue
             try:
                 alvo = os.readlink(caminho)
