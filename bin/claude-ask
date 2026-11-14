@@ -78,7 +78,10 @@ $prompt"
 
 log="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$log" "$err"' EXIT
 # Garante o caminho nativo (assinatura via app oficial), nunca um proxy.
+# Advisor desligado: worker/revisor headless nunca consulta outro modelo por fora
+# (relê a conversa sem cache; ver § Claude: workers e exceções).
 cd "$cwd" && env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN CLAUDE_ASK_WORKER=1 \
+  CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 \
   timeout 1200 claude -p ${model:+--model "$model"} ${effort:+--effort "$effort"} --permission-mode "$perm" ${sem_tools:+--disallowedTools "$sem_tools"} -- "$prompt" </dev/null >"$log" 2>"$err"
 rc=$?
 if [ $rc -eq 0 ]; then
