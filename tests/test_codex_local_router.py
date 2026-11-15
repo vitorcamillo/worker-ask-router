@@ -78,7 +78,8 @@ def test_default_chain_intacta_sem_local():
     for orch in ("codex", "claude", "zcode", "muse", "opencode"):
         chain = wr.wrapper_chain(orch, True, "write")
         names = [n for n, _ in chain]
-        assert names == ["zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask"]
+        assert names == ["zcode-worker", "muse-ask", "opencode-ask", "codex-ask",
+                         "claude-ask", "zcode-pago"]
         assert "codex-local" not in names
     assert "codex-local" not in wr.CACHE_KEYS
     assert "codex-local" not in wr._EXECUTOR_LABELS

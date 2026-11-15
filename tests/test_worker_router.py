@@ -570,7 +570,15 @@ def test_wrapper_chain_is_independent_of_orchestrator():
         ("opencode-ask", "opencode"),
         ("codex-ask", "codex"),
         ("claude-ask", "claude"),
+        ("zcode-pago", "zcode"),
     ]
+
+
+@pytest.mark.parametrize("allow_muse", [False, True])
+def test_zcode_pago_e_sempre_o_ultimo_degrau(allow_muse):
+    ch = wr.wrapper_chain("claude", allow_muse, "write")
+    assert ch[-1] == ("zcode-pago", "zcode")
+    assert [n for n, _ in ch].count("zcode-pago") == 1
 
 
 @pytest.mark.parametrize("allow_muse", [False, True])
@@ -581,7 +589,7 @@ def test_codex_orchestrator_allows_luna_worker(allow_muse):
 
 
 def test_codex_terra_resolves_the_codex_ask_binary():
-    assert wr.WRAPPER_BINARIES == {"codex-terra": "codex-ask"}
+    assert wr.WRAPPER_BINARIES == {"codex-terra": "codex-ask", "zcode-pago": "zcode-worker"}
 
 
 @pytest.mark.parametrize("mode,expected", [("write", "write"), ("plan", "plan")])
@@ -671,7 +679,7 @@ def test_partial_write_blocks_handoff(fake_env, mode):
 
 
 EXPECTED_EXHAUSTED_LOGS = {
-    name: ["zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask"]
+    name: ["zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask", "zcode-worker"]
     for name in wr.ORCHESTRATORS
 }
 
@@ -830,7 +838,7 @@ def test_optout_muse_remains_excluded_after_all_failures(fake_env):
     log = fake_env["tmp"] / "calls"
     result = run_cli(fake_env, ["--mode", "plan", "--no-muse", "task"], {"FAKE_RC": "75", "FAKE_LOG": str(log)})
     assert result.returncode == 75
-    assert [json.loads(line)["name"] for line in log.read_text().splitlines()] == ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask"]
+    assert [json.loads(line)["name"] for line in log.read_text().splitlines()] == ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask", "zcode-worker"]
 
 
 def test_lock_contention_is_bounded(fake_env):
@@ -1052,7 +1060,7 @@ def test_muse_in_chain_by_default(fake_env):
                      {"FAKE_RC": "75", "FAKE_LOG": str(log)})
     assert result.returncode == 75
     names = [json.loads(line)["name"] for line in log.read_text().splitlines()]
-    assert names == ["zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask"]
+    assert names == ["zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask", "zcode-worker"]
     assert names[1] == "muse-ask"
 
 
@@ -1063,7 +1071,7 @@ def test_no_muse_flag_removes_muse(fake_env):
     assert result.returncode == 75
     names = [json.loads(line)["name"] for line in log.read_text().splitlines()]
     assert "muse-ask" not in names
-    assert names == ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask"]
+    assert names == ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask", "zcode-worker"]
 
 
 def test_no_muse_marker_removes_muse(fake_env):
@@ -1128,12 +1136,12 @@ def test_wrapper_chain_segue_ordem_do_painel(tmp_path, monkeypatch):
     arq = tmp_path / "ordem.json"
     monkeypatch.setenv("WORKER_ASK_ORDEM", str(arq))
     arq.write_text('{"provedores": ["opencode", "zcode", "claude", "muse", "codex"]}')
-    assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == ["opencode", "zcode", "claude", "muse", "codex"]
-    assert [n for _, n in wr.wrapper_chain("claude", False, "write")] == ["opencode", "zcode", "claude", "codex"]
+    assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == ["opencode", "zcode", "claude", "muse", "codex", "zcode"]
+    assert [n for _, n in wr.wrapper_chain("claude", False, "write")] == ["opencode", "zcode", "claude", "codex", "zcode"]
     # Lista que não é permutação exata (falta, sobra ou repete) cai na ordem padrão.
     for ruim in ('{"provedores": ["zcode", "zcode", "muse", "opencode", "codex"]}',
                  '{"provedores": ["zcode", "muse", "opencode", "codex", "claude", "x"]}', "{", "[]",
                  '{"provedores": [1, "zcode", "muse", "opencode", "codex"]}',
                  '{"provedores": [["zcode"], "muse", "opencode", "codex", "claude"]}'):
         arq.write_text(ruim)
-        assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == list(wr._ORDEM_PADRAO)
+        assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == [*wr._ORDEM_PADRAO, "zcode"]

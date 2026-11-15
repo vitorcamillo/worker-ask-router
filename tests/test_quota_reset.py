@@ -338,7 +338,12 @@ def test_quota_query_respects_router_total_deadline(fake_env):
         "def limites_glm():\n    import time\n    time.sleep(2)\n    return {}\n"
     )
     start = time.monotonic()
-    result = run_cli(fake_env, ["--mode", "plan", "--timeout", "0.1", "task"])
+    # Com a regra nova, query_reset("zcode-worker") so olha o Start Plan (rapido);
+    # a consulta lenta de cota do GLM (limites_glm) acontece no degrau final
+    # zcode-pago. Todos os falsos falham com rc 75 para a cadeia chegar ao
+    # degrau pago, cuja consulta de cota deve respeitar o prazo total.
+    result = run_cli(fake_env, ["--mode", "plan", "--timeout", "1.0", "task"],
+                     {"FAKE_RC": "75"})
     assert result.returncode == 124
     assert time.monotonic() - start < 1.5
     assert result.stdout == b""

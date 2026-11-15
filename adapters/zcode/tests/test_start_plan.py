@@ -65,7 +65,7 @@ def test_glm53_never_start(tmp_path):
 def test_env_disable_and_enable(tmp_path):
     s = tmp_path / "state"
     for value in ("0", "off", "OFF", "false", "False", "no", "NO", " 0 "):
-        assert features.provider_for("glm-5.3-flash", now=noon(), state_dir=s, environ={"ZCODE_WORKER_START_PLAN": value}) == base.PROVIDER_ID
+        assert features.provider_for("glm-5.3-flash", now=noon(), state_dir=s, environ={"ZCODE_WORKER_START_PLAN": value, "ZCODE_WORKER_ALLOW_PAID": "1"}) == base.PROVIDER_ID
     assert features.provider_for("glm-5.3-flash", now=noon(), state_dir=s, environ={"ZCODE_WORKER_START_PLAN": "1"}) == features.START_PLAN_PROVIDER_ID
     assert features.provider_for("glm-5.3-flash", now=noon(), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
 
@@ -103,11 +103,11 @@ def test_busy_markers_keep_start_plan_provider(tmp_path):
         assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 21), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
 
 def test_quota_marker_blocks_start_plan_until_recheck(tmp_path):
-    # Sem cota de verdade, o pago continua valendo até o marcador expirar.
+    # Sem cota de verdade e com o pago liberado, o pago vale até o marcador expirar.
     s = tmp_path / "state"
     now = datetime.datetime(2026, 10, 15, 13, 20)
     features.mark_start_plan_unavailable("quota", now=now, state_dir=s)
-    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 24), state_dir=s, environ={}) == base.PROVIDER_ID
+    assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 24), state_dir=s, environ={"ZCODE_WORKER_ALLOW_PAID": "1"}) == base.PROVIDER_ID
     assert features.provider_for("glm-5.3-flash", now=datetime.datetime(2026, 10, 15, 13, 25), state_dir=s, environ={}) == features.START_PLAN_PROVIDER_ID
 
 def test_read_start_plan_marker_returns_until_and_reason(tmp_path):

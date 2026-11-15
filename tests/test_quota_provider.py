@@ -42,7 +42,14 @@ def test_consult_glm_without_model(home):
     reset = now + 7 * 86400
     install_source(home, "return " + repr({"janelas": [{"pct": 100, "reset": reset}]}))
     block_start(home, now + 10 * 86400)
-    assert p.query_reset("zcode-worker") == pytest.approx(reset, abs=1.0)
+    marker = (
+        (home / ".local/state/zcode-worker/start-plan-unavailable")
+        .read_text()
+        .split()[0]
+    )
+    expected = datetime.datetime.fromisoformat(marker).timestamp()
+    assert p.query_reset("zcode-worker") == pytest.approx(expected, abs=1.0)
+    assert p.query_reset("zcode-pago") == pytest.approx(reset, abs=1.0)
 
 
 def test_preflight_skips_blocked_before_task(fake_env, monkeypatch):
@@ -97,11 +104,19 @@ def test_start_blocked_limits_reset(home):
     assert p.query_reset("zcode-worker") == pytest.approx(expected, abs=1.0)
 
 
-def test_start_disabled_uses_paid(home, monkeypatch):
+def test_start_disabled_nao_consulta_pago(home, monkeypatch):
     reset = time.time() + 7 * 86400
     install_source(home, "return " + repr({"janelas": [{"pct": 100, "reset": reset}]}))
     monkeypatch.setenv("ZCODE_WORKER_START_PLAN", "0")
-    assert p.query_reset("zcode-worker") == reset
+    assert p.query_reset("zcode-worker") is None
+    assert p.query_reset("zcode-pago") == reset
+
+
+def test_start_livre_ignora_cota_do_pago(home):
+    reset = time.time() + 7 * 86400
+    install_source(home, "return " + repr({"janelas": [{"pct": 100, "reset": reset}]}))
+    assert p.query_reset("zcode-worker") is None
+    assert p.query_reset("zcode-pago") == pytest.approx(reset, abs=1.0)
 
 
 def test_start_marker_unreadable(home):

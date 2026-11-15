@@ -186,14 +186,14 @@ def _query_plan_reset(wrapper, now, budget):
 
 
 def query_reset(wrapper, now=None, budget=10.0):
-    """Reset efetivo do zcode-worker: Start Plan livre libera sem consultar o pago."""
+    """Reset por degrau: zcode-worker só olha o Start Plan; zcode-pago, o plano pago."""
     now = time.time() if now is None else now
+    if wrapper == "zcode-pago":
+        return _query_plan_reset("zcode-worker", now, budget)
     if wrapper != "zcode-worker":
         return _query_plan_reset(wrapper, now, budget)
     start = _start_plan_until(now)
-    if start is None:
+    # Start desligado por env (inf) não tem reset: o próprio worker responde 75 na hora.
+    if start is None or start == float("inf"):
         return None
-    paid = _query_plan_reset(wrapper, now, budget)
-    if paid is None:
-        return None
-    return min(paid, start)
+    return start

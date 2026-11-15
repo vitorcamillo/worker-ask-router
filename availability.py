@@ -17,7 +17,9 @@ from pathlib import Path
 
 import quota_provider
 
-WORKERS = ("zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask")
+WORKERS = ("zcode-worker", "muse-ask", "opencode-ask", "codex-ask", "claude-ask", "zcode-pago")
+# zcode-pago é o mesmo binário do zcode-worker (plano pago liberado): mesmas vagas.
+_ZCODE = ("zcode-worker", "zcode-pago")
 TABLE_NAME = "availability.json"
 DEFAULT_MAX_AGE = 330.0  # segundos; env WORKER_ASK_AVAIL_MAX_AGE sobrepõe (finito, > 0)
 SCHEMA = 1
@@ -178,7 +180,7 @@ def slots(name):
         "no",
     }:
         return None
-    if name == "zcode-worker":
+    if name in _ZCODE:
         return _slots_zcode()
     if name == "opencode-ask":
         return _slots_opencode()
@@ -198,7 +200,7 @@ def reserve(name, state_dir):
     if not probe.get("free"):
         return False
     flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
-    base = os.path.join(os.fspath(state_dir), f"vaga-{name}")
+    base = os.path.join(os.fspath(state_dir), f"vaga-{'zcode-worker' if name in _ZCODE else name}")
     mestre = livre = None
     try:
         mestre = os.open(base + ".lock", flags, 0o600)

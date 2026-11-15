@@ -384,7 +384,7 @@ def test_quota_reset_known_skips_whole_chain(cov_env, monkeypatch):
     assert run_main(base_args(cov_env)) == 75
     assert records(cov_env) == []
     cache = wr.load_cache()
-    assert set(cache) == set(FAKE_NAMES)
+    assert set(cache) == set(FAKE_NAMES) | {"zcode-pago"}
     assert all(e["reset_known"] is True for e in cache.values())
 
 
@@ -507,7 +507,7 @@ def test_had_timeout_after_exhausted_chain_exits_124(cov_env, monkeypatch, capsy
     for name in FAKE_NAMES[1:]:
         (cov_env["bin"] / name).unlink()
     monkeypatch.setattr(wr, "run_wrapper",
-                        lambda argv, cwd, prompt, budget: (124, b"", b"", True))
+                        lambda argv, cwd, prompt, budget, **kwargs: (124, b"", b"", True))
     argv = base_args(cov_env, "--timeout", "30", "--no-muse")
     assert run_main(argv) == 124
     assert "todos os workers indisponiveis ou com timeout" in capsys.readouterr().err
@@ -616,19 +616,22 @@ def test_muse_chain_default_and_marker_optout(cov_env, monkeypatch, marker):
     assert run_main(base_args(cov_env)) == 75
     names = [r["name"] for r in records(cov_env)]
     if marker:
-        assert names == ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask"]
+        assert names == ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask",
+                         "zcode-worker"]
     else:
-        assert names == FAKE_NAMES
+        assert names == FAKE_NAMES + ["zcode-worker"]
 
 
 def test_no_muse_flag_and_env_optout(cov_env, monkeypatch):
     monkeypatch.setenv("FAKE_RC", "75")
     monkeypatch.setenv("WORKER_ASK_NO_MUSE", "1")
     assert run_main(base_args(cov_env)) == 75
+    # O degrau final zcode-pago executa o mesmo binario zcode-worker (sem muse).
     assert [r["name"] for r in records(cov_env)] == \
-        ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask"]
-    # Sem env, a flag --no-muse tambem exclui o Muse.
+        ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask", "zcode-worker"]
+    # Sem env, a flag --no-muse tambem exclui o Muse. No segundo run toda a
+    # cadeia esta em cooldown de cota, entao nenhum binario novo e chamado.
     monkeypatch.delenv("WORKER_ASK_NO_MUSE")
     assert run_main(base_args(cov_env, "--no-muse")) == 75
-    assert [r["name"] for r in records(cov_env)][-4:] == \
-        ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask"]
+    assert [r["name"] for r in records(cov_env)][-5:] == \
+        ["zcode-worker", "opencode-ask", "codex-ask", "claude-ask", "zcode-worker"]

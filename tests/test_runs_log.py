@@ -348,13 +348,15 @@ def test_timeout_em_write_registra_metricas(fake_env):
 def test_todos_rc75_registra_metricas_da_ultima_tentativa(fake_env):
     env = {("FAKE_RC_" + n): "75" for n in ("ZCODE_WORKER", "MUSE_ASK",
                                             "OPENCODE_ASK", "CODEX_ASK", "CLAUDE_ASK")}
-    env["FAKE_STDOUT_CLAUDE_ASK"] = ("resposta util\n--- claude-ask: "
-                                     "tokens=in:7/out:3 custo=$0.02 ---")
+    # A ultima tentativa agora e o degrau zcode-pago (mesmo binario zcode-worker,
+    # rc 75): o rodape de usage fica nele, e nao mais no claude-ask.
+    env["FAKE_STDOUT_ZCODE_WORKER"] = ("resposta util\n--- claude-ask: "
+                                       "tokens=in:7/out:3 custo=$0.02 ---")
     r = run_cli(fake_env, ["--mode", "write", "--allowed-file", "a.txt", "hi"], env)
     assert r.returncode == 75
     rec = read_runs(fake_env)[0]
     assert rec["rc"] == 75
-    assert rec["executor"] == "claude-ask"
+    assert rec["executor"] == "zcode-pago"
     assert rec["usage"] == {"input": 7, "output": 3, "cost_usd": 0.02}
     assert rec["changed_files"] == 0
 

@@ -365,6 +365,20 @@ def mark_start_plan_confirmed(*, now=None, state_dir=None) -> None:
         return
 
 
+def paid_allowed(environ=None) -> bool:
+    """Plano pago só com liberação explícita (último degrau do roteador)."""
+    env = os.environ if environ is None else environ
+    raw = env.get("ZCODE_WORKER_ALLOW_PAID")
+    return isinstance(raw, str) and raw.strip().lower() in {"1", "on", "true", "yes"}
+
+
+def paid_blocked_error(motivo: str) -> FeatureError:
+    """Erro de cota (exit 75): Start fora do ar e plano pago não liberado."""
+    return FeatureError(
+        f"Start Plan indisponível ({motivo}); plano pago só como último recurso do roteador", "quota"
+    )
+
+
 def provider_for(model: str, *, now=None, state_dir=None, environ=None) -> str:
     try:
         canonical = _canonical_model(model)
@@ -374,9 +388,16 @@ def provider_for(model: str, *, now=None, state_dir=None, environ=None) -> str:
         return PROVIDER_ID
     env = os.environ if environ is None else environ
     raw = env.get("ZCODE_WORKER_START_PLAN")
+    # Modelo do Start Plan nunca cai no plano pago por conta própria: sem
+    # ZCODE_WORKER_ALLOW_PAID a chamada sai com exit 75 e o roteador segue a
+    # cadeia; o pago fica para o último degrau (zcode-pago).
     if isinstance(raw, str) and raw.strip().lower() in {"0", "off", "false", "no"}:
+        if not paid_allowed(env):
+            raise paid_blocked_error("desligado")
         return PROVIDER_ID
     if start_plan_blocked(now=now or datetime.datetime.now(), state_dir=state_dir):
+        if not paid_allowed(env):
+            raise paid_blocked_error("sem cota")
         return PROVIDER_ID
     return START_PLAN_PROVIDER_ID
 

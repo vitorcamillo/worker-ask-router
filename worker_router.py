@@ -28,7 +28,11 @@ MAX_INPUT_BYTES = 64 * 1024
 MAX_OUTPUT_BYTES = 1 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
 MAX_ALLOWED_FILES = 128
-CACHE_KEYS = ("zcode-worker", "codex-terra", "muse-ask", "opencode-ask", "codex-ask", "claude-ask")
+CACHE_KEYS = ("zcode-worker", "codex-terra", "muse-ask", "opencode-ask", "codex-ask", "claude-ask",
+              "zcode-pago")
+# Ultimo degrau: o mesmo zcode-worker com o plano pago liberado. So roda quando
+# nenhum outro worker atendeu; o degrau zcode-worker comum fica so no Start Plan.
+ZCODE_PAGO = "zcode-pago"
 ORCHESTRATORS = ("codex", "claude", "zcode", "muse", "opencode")
 TIMEOUT_DIRECTIVE = "worker-ask: execucao interrompida por timeout; nao indica cota nem informa data de liberacao. Revise o estado da tarefa antes de uma nova tentativa."
 DEFAULT_MIN_TIMEOUT = 300.0
@@ -286,10 +290,11 @@ _EXECUTOR_LABELS = {
     "opencode-ask": "OpenCode",
     "codex-ask": "Codex",
     "claude-ask": "Claude",
+    ZCODE_PAGO: "ZCode (pago)",
 }
 
 # codex-terra nao tem binario proprio: e o codex-ask fixado em gpt-6.1-terra medium.
-WRAPPER_BINARIES = {"codex-terra": "codex-ask"}
+WRAPPER_BINARIES = {"codex-terra": "codex-ask", ZCODE_PAGO: "zcode-worker"}
 
 
 def _emit_executor_start(name, mode, model=None):
@@ -1279,10 +1284,14 @@ def _safe_failure_marker(stderr_data):
     return (MARKER + str(reset)).encode() if reset is not None else b""
 
 
-def run_wrapper(argv, cwd, prompt_bytes, timeout, isolated=False):
+def run_wrapper(argv, cwd, prompt_bytes, timeout, isolated=False, paid=False):
     global _CURRENT_PROC
     deadline = time.monotonic() + timeout
-    env = {k: v for k, v in os.environ.items() if k not in ("MUSE_ASK_MODEL", "MUSE_ASK_EFFORT", "ASK_PRESENTATION_FD")}
+    # ZCODE_WORKER_ALLOW_PAID nunca e herdado: so o degrau zcode-pago libera o plano pago.
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("MUSE_ASK_MODEL", "MUSE_ASK_EFFORT", "ASK_PRESENTATION_FD", "ZCODE_WORKER_ALLOW_PAID")}
+    if paid:
+        env["ZCODE_WORKER_ALLOW_PAID"] = "1"
     env["WORKER_ASK_ACTIVE"] = "1"
     env["WORKER_ASK_QUOTA_HELPER"] = str(Path(__file__).resolve().with_name("quota_reset.py"))
     # O opencode-ask espera vaga ate 900 s por padrao; quem definiu a variavel mantem o valor.
@@ -1376,12 +1385,14 @@ def wrapper_chain(orchestrator, allow_muse, mode):
     # A plataforma do orquestrador nao restringe o worker; recursao tem trava propria.
     wrappers = {"zcode": "zcode-worker", "muse": "muse-ask", "opencode": "opencode-ask",
                 "codex": "codex-ask", "claude": "claude-ask"}
-    return [(wrappers[n], n) for n in _ordem_provedores() if n != "muse" or allow_muse]
+    chain = [(wrappers[n], n) for n in _ordem_provedores() if n != "muse" or allow_muse]
+    # Plano pago do ZCode: sempre o ultimo, fora da ordem salva pelo painel.
+    return chain + [(ZCODE_PAGO, "zcode")]
 
 
 def build_argv(name, path, mode, cwd):
     cwd_abs = os.path.abspath(cwd)
-    if name == "zcode-worker":
+    if name in ("zcode-worker", ZCODE_PAGO):
         m = "edit" if mode == "write" else "plan"
         return [path, "--mode", m, "--model", "glm-5.3-flash", "--effort", "high", "--cwd", cwd_abs,
                 "--queue-timeout", f"{_zcode_queue_timeout():g}"]
@@ -1976,7 +1987,7 @@ def _main_impl(argv=None):
             _exit_timeout("erro: timeout total esgotado", detail="prazo total esgotado")
         # zcode-worker espera na fila antes de executar; a espera nao consome o
         # tempo de execucao da fatia, so o prazo total.
-        queue_extra = _zcode_queue_timeout() if name == "zcode-worker" else 0.0
+        queue_extra = _zcode_queue_timeout() if name in ("zcode-worker", ZCODE_PAGO) else 0.0
         budget = min(args.step_timeout + queue_extra, remaining)
 
         argv_list = build_argv(name, path, args.mode, exec_cwd)
@@ -1986,6 +1997,8 @@ def _main_impl(argv=None):
             try:
                 # Sem isolamento a chamada fica idêntica à anterior (4 argumentos posicionais).
                 iso_kwargs = {"isolated": True} if attempt is not None else {}
+                if name == ZCODE_PAGO:
+                    iso_kwargs["paid"] = True
                 rc, stdout_data, stderr_data, timed_out = run_wrapper(
                     argv_list, exec_cwd, exec_prompt, budget, **iso_kwargs)
             finally:

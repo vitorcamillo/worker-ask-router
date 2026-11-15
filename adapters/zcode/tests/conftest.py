@@ -24,5 +24,8 @@ def _isolated_worker_environment(monkeypatch):
     for name in ("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "ZCODE_DATA_BASE_DIR"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("ZCODE_WORKER_START_PLAN", "0")
+    # A suíte exercita o plano pago como no degrau zcode-pago do roteador; os
+    # testes da regra "sem pago por conta própria" removem esta variável.
+    monkeypatch.setenv("ZCODE_WORKER_ALLOW_PAID", "1")
     monkeypatch.setattr("zcode_worker.cli.APP_TASKS_INDEX", "/nonexistent/zcode-worker-tests/tasks-index.sqlite")
     yield

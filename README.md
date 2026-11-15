@@ -162,6 +162,7 @@ Codex tambem pode usar o worker Luna (`codex-ask`). A protecao contra recursao e
 `WORKER_ASK_ACTIVE=1`, propagada aos workers: eles nao podem delegar outra tarefa ao roteador.
 O Muse e padrao na cadeia; o opt-out por projeto usa `--no-muse`, `WORKER_ASK_NO_MUSE=1` ou o arquivo `.worker-ask-no-muse` na raiz do projeto (usar em projeto com dado pessoal, base de clientes, dump ou segredo real). `--allow-muse` virou no-op, mantido por compatibilidade.
 
-A cadeia vigente usa ZCode, Muse (padrao; opt-out por projeto), OpenCode, Codex Luna e Claude Haiku.
+A cadeia vigente usa ZCode (so Start Plan), Muse (padrao; opt-out por projeto), OpenCode, Codex Luna, Claude Haiku e, por ultimo, ZCode no plano pago (`zcode-pago`).
+O plano pago do ZCode so entra quando nenhum outro worker atendeu: o degrau `zcode-worker` nunca cai no pago por conta propria (Start sem cota, ocupado ou desligado = rc 75 e a cadeia segue); so o degrau `zcode-pago` exporta `ZCODE_WORKER_ALLOW_PAID=1`. Fora do roteador, `zcode-worker` com modelo do Start so usa o pago com essa variavel definida. O `zcode-pago` fica sempre no fim, fora da ordem salva pelo painel.
 O degrau Terra foi retirado da cadeia; seu handler antigo permanece apenas por
 compatibilidade. Esta politica substitui a cadeia anunciada no commit 07cb87c.

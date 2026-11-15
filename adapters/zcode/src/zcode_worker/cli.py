@@ -41,8 +41,9 @@ _LAUNCHER_INCOMPATIBLE_MESSAGE = "launcher de autenticacao incompativel com o bu
 # com rc 1 sem casar RATE_RE; é limite temporário, não falha do CLI.
 _START_BUSY_RE = re.compile(r"concurrency\s+limit|Start Plan is busy|model_rate_limited", re.I)
 QUOTA_RETRY_DEFAULT_SECONDS = 3600
-# Sem espera: rate limit no Start segue ao plano pago na mesma chamada.
-# Limite de concorrência do Start é transitório: insiste no Start antes do pago.
+# Limite de concorrência do Start é transitório: insiste no Start. Esgotado,
+# sai com exit 75 (o roteador segue a cadeia); o plano pago só entra na mesma
+# chamada com ZCODE_WORKER_ALLOW_PAID (degrau zcode-pago, último recurso).
 START_PLAN_RETRY_DELAYS = (5, 10, 20)
 WORKER_SESSION_TTL_SECONDS = 6 * 3600
 APP_TASKS_INDEX = os.environ.get(
@@ -1056,6 +1057,8 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                         features.mark_start_plan_unavailable("drift")
                     else:
                         raise
+                    if not features.paid_allowed():
+                        raise features.paid_blocked_error(_probe_code) from _probe_error
                     args._provider = features.PROVIDER_ID
                     requested = features.requested_selection(args.model, args.effort, args._provider)
                     probe_fallback = "probe"
@@ -1064,6 +1067,8 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                         features.mark_start_plan_confirmed()
                     else:
                         features.mark_start_plan_unavailable("mismatch")
+                        if not features.paid_allowed():
+                            raise features.paid_blocked_error("mismatch")
                         args._provider = features.PROVIDER_ID
                         requested = features.requested_selection(args.model, args.effort, args._provider)
                         probe_fallback = "probe"
@@ -1123,6 +1128,10 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                             "Start Plan esgotado durante a fatia; revise o diff e relance (a próxima chamada usa o plano)",
                             "start_plan_exhausted",
                         ) from _error
+                # Sem liberação explícita o plano pago não entra: exit 75 e o
+                # roteador segue para os outros workers.
+                if not features.paid_allowed():
+                    raise features.paid_blocked_error(_fallback) from _error
                 args._provider = features.PROVIDER_ID
                 requested = features.requested_selection(args.model, args.effort, args._provider)
                 raw = _execute(args, task, db_path=db_path, runner=runner, event_sink=event_sink, total_deadline=total_deadline)
