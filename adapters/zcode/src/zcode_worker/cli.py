@@ -1090,6 +1090,10 @@ def run_task(args: SimpleNamespace, task: str, *, db_path=None, runner=None, eve
                 if args._provider == features.START_PLAN_PROVIDER_ID and effective.get("providerId") != args._provider:
                     features.mark_start_plan_unavailable("mismatch")
                     fallback = "mismatch"
+                    # Sucesso que pousou no plano pago sem liberação explícita não
+                    # é conclusão: exit 75 e o roteador segue para os outros workers.
+                    if not features.paid_allowed():
+                        raise features.paid_blocked_error("mismatch")
                 return _finish(payload, requested, effective, fallback)
             except features.FeatureError as _error:
                 _is_start = getattr(args, "_provider", None) == features.START_PLAN_PROVIDER_ID

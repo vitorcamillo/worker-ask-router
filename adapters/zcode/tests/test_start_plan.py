@@ -597,6 +597,15 @@ def test_fallback_mismatch(tmp_path, monkeypatch):
     assert result["startPlanFallback"] == "mismatch" and calls["n"] == 1
     assert result["effective"]["providerId"] == base.PROVIDER_ID
 
+def test_fallback_mismatch_without_paid_returns_75(tmp_path, monkeypatch):
+    # O mesmo rebaixamento Start->pago, sem ZCODE_WORKER_ALLOW_PAID: nada de
+    # conclusão paga; exit 75 para o roteador seguir para os outros workers.
+    monkeypatch.delenv("ZCODE_WORKER_ALLOW_PAID", raising=False)
+    ok = (0, '{"sessionId":"sess_1","response":"ok"}', "")
+    result, code, calls = _run_with_mocks(tmp_path, monkeypatch, mode="plan", responses=[ok])
+    assert code == 75 and result["error"]["code"] == "quota"
+    assert calls["n"] == 1 and "startPlanFallback" not in result
+
 def test_success_start_plan_marks_confirmed(tmp_path, monkeypatch):
     db = tmp_path / "db.sqlite"
     make_selection_db(db, session="sess_1", provider=features.START_PLAN_PROVIDER_ID)
