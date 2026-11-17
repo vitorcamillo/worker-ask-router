@@ -448,3 +448,29 @@ class BridgeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpencodeLoginCheckTests(unittest.TestCase):
+    """opencode auth list sai 0 sem credencial; o check precisa olhar a saída."""
+
+    def _check(self, script):
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "opencode")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\n" + script)
+            os.chmod(fake, 0o755)
+            old = os.environ["PATH"]
+            os.environ["PATH"] = d + os.pathsep + old
+            try:
+                return wav._check_cli(wav.DEFAULT_LOGIN_CHECKS["opencode"])
+            finally:
+                os.environ["PATH"] = old
+
+    def test_sem_credencial_rc0_e_sem_login(self):
+        self.assertEqual(self._check("echo 'No authenticated integrations'\nexit 0\n"), "sem-login")
+
+    def test_com_credencial_e_logado(self):
+        self.assertEqual(self._check("echo 'OpenCode Go  api'\nexit 0\n"), "logado")
+
+    def test_rc_diferente_de_zero_e_sem_login(self):
+        self.assertEqual(self._check("exit 1\n"), "sem-login")

@@ -1204,7 +1204,7 @@ def doctor() -> dict:
         pass
     try:
         memory = base._read_mem_available_bytes()
-        memory_status = "adequada" if memory >= base.MIN_MEM_AVAILABLE else "abaixo do mínimo"
+        memory_status = "adequada" if memory >= base.min_mem_available() else "abaixo do mínimo"
     except Exception:
         memory_status = "indisponível"
     try:

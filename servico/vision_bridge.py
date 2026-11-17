@@ -36,7 +36,9 @@ TASK_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 ALLOWED_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 FORBIDDEN_BINDS = {"0.0.0.0", "::"}
 DEFAULT_LOGIN_CHECKS = {
-    "opencode": ["opencode", "auth", "list"],
+    # "opencode auth list" sai 0 mesmo sem credencial ("No authenticated integrations").
+    "opencode": ["sh", "-c", 'out=$(opencode auth list 2>&1) || exit 1; '
+                 'case "$out" in *"No authenticated"*) exit 1;; esac'],
     "codex": ["codex", "login", "status"],
     "claude": ["claude", "auth", "status"],
 }

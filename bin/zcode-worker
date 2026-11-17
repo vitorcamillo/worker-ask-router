@@ -39,6 +39,16 @@ EFFORTS = ("low", "high", "max")
 # Curto de propósito: rate limit persistente devolve 75 em ~45 s e o roteador entrega a outro worker.
 RETRY_DELAYS = (15, 30)
 MIN_MEM_AVAILABLE = 4 * 1024 * 1024 * 1024
+
+
+def min_mem_available():
+    """Memória mínima livre em bytes; ZCODE_ADMIT_MIN_MEM_MIB (>=256) ajusta em runtime,
+    como em zcode_headless_admit.py (container com limite de RAM menor que 4 GiB)."""
+    raw = os.environ.get("ZCODE_ADMIT_MIN_MEM_MIB")
+    if raw is not None and raw.isdecimal() and int(raw) >= 256:
+        return int(raw) * 1024 * 1024
+    return MIN_MEM_AVAILABLE
+
 QUEUE_POLL_SECONDS = 2.0
 QUEUE_NOTICE_SECONDS = 30.0
 QUOTA_RE = re.compile(
@@ -383,7 +393,7 @@ def global_slot(queue_deadline, total_deadline=None):
                 if admission_locked:
                     available = _read_mem_available_bytes()
                     active = count_active_cli_processes()
-                    if available >= MIN_MEM_AVAILABLE and active < count:
+                    if available >= min_mem_available() and active < count:
                         for index in range(count):
                             fd = _open_lock(os.path.join(lock_dir, f"slot-{index}.lock"))
                             if _try_lock(fd):

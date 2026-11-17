@@ -22,6 +22,7 @@ COPY worker_router.py availability.py quota_provider.py quota_reset.py worker_is
 COPY bin/opencode-ask bin/claude-ask bin/codex-ask bin/ask_presentation.py /opt/worker-ask/bin/
 COPY bin/zcode-cli bin/zcode-worker bin/zcode_headless_admit.py /opt/worker-ask/bin/
 COPY adapters/zcode/auth/launch.cjs adapters/zcode/auth/zai-session.cjs /opt/worker-ask/adapters/zcode/auth/
+COPY adapters/zcode/src/zcode_worker/ /opt/worker-ask/adapters/zcode/src/zcode_worker/
 COPY servico/vision_bridge.py servico/ordem.json servico/entrypoint.sh /opt/worker-ask/servico/
 
 RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
@@ -52,6 +53,7 @@ ENV HOME=/home/worker \
     WAV_WORKER_ASK=worker-ask \
     ZCODE_ADMIT_MIN_MEM_MIB=1024 \
     ZCODE_WORKER_CONTEXT_CLI=/opt/worker-ask/bin/zcode-cli \
+    ZCODE_WORKER_CONTEXT_PROVIDER_CONFIG=/home/worker/.local/state/zcode-worker/auth/.zcode/v2/provider_config.json \
     PYTHONDONTWRITEBYTECODE=1
 
 USER worker
