@@ -1,5 +1,9 @@
 # worker-ask
 
+![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-suportado-FCC624?logo=linux&logoColor=black)
+
+**In English:** a single `worker-ask` command that routes coding tasks across Codex, Claude Code, ZCode, Muse and OpenCode, with automatic fallback when one provider hits its usage limit.
+
 [Licença MIT](LICENSE) · [Como contribuir](CONTRIBUTING.md)
 
 ![Demonstração do worker-ask-router](docs/demo.png)
