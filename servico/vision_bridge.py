@@ -467,7 +467,13 @@ def _run_worker(config: Config, task_id: str, spec: str, img_bytes, ext: str, ti
         ]
         if config.no_muse:
             cmd.append("--no-muse")
-        env = dict(os.environ)
+        # O filho roda worker-ask e os CLIs de IA sobre imagem externa: nao
+        # herda o token do servico nem as WAV_* de configuracao.
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "WORKER_ASK_VISION_TOKEN" and not k.startswith("WAV_")
+        }
         env["WORKER_ASK_MIN_TIMEOUT"] = str(timeout_s)
         try:
             proc = subprocess.Popen(

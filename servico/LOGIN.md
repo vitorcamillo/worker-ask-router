@@ -68,8 +68,10 @@ exporte antes:
 export ZCODE_CREDENTIAL_SECRET_FILE=~/.config/zcode-worker/credential-secret
 ```
 
-Confira em `GET /healthz?clis=1`; o check `zcode` é o da fatia anterior, se
-existir — caso contrário, rode `worker-ask --status`.
+`GET /healthz?clis=1` cobre apenas os checks padrão (opencode, codex e
+claude); não há check automático do zcode, porque o bundle é opcional e
+transferido pelo operador. Confirme o login do ZCode com `worker-ask --status`
+ou com uma tarefa curta de visão.
 
 ## Depois
 

@@ -36,6 +36,9 @@ RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
         /opt/worker-ask/bin/zcode-worker \
         /opt/worker-ask/bin/zcode_headless_admit.py
 
+# No Coolify, defina WAV_ALLOWED_HOSTS com o hostname pelo qual o cliente
+# interno (phantoraCaptcha) chama este servico na rede Docker; sem ela so
+# 127.0.0.1/localhost passam na checagem de Host e o cliente recebe 421.
 ENV HOME=/home/worker \
     PATH=/opt/worker-ask/bin:$PATH \
     WORKER_ASK_ORDEM=/opt/worker-ask/servico/ordem.json \

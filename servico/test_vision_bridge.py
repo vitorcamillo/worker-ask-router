@@ -60,6 +60,12 @@ sleep 30
 exit 0
 """
 
+FAKE_ENV = """#!/bin/sh
+cat > /dev/null
+env
+exit 0
+"""
+
 
 def _write_exe(path, content):
     with open(path, "w", encoding="utf-8") as f:
@@ -231,6 +237,37 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("POINT=1,2", obj["stdout"])
         self.assertIn("task-1", obj["stdout"])
         self.assertIn("yes", obj["stdout"])
+
+    def test_child_env_sanitized(self):
+        fake = os.path.join(self.tmp.name, "fake-env.sh")
+        _write_exe(fake, FAKE_ENV)
+        old_token = os.environ.get("WORKER_ASK_VISION_TOKEN")
+        old_probe = os.environ.get("WAV_PROBE_TEST")
+        try:
+            os.environ["WORKER_ASK_VISION_TOKEN"] = "D" * 40
+            os.environ["WAV_PROBE_TEST"] = "probe-wav"
+            _, port = self._start(fake)
+            st, data = self._post(
+                port, {"task_id": "env1", "spec": "oi"}, token=self.token
+            )
+        finally:
+            if old_token is None:
+                os.environ.pop("WORKER_ASK_VISION_TOKEN", None)
+            else:
+                os.environ["WORKER_ASK_VISION_TOKEN"] = old_token
+            if old_probe is None:
+                os.environ.pop("WAV_PROBE_TEST", None)
+            else:
+                os.environ["WAV_PROBE_TEST"] = old_probe
+        self.assertEqual(st, 200)
+        out = json.loads(data)["stdout"]
+        # O filho nao pode ver o token nem nenhuma WAV_* do servico.
+        self.assertNotIn("D" * 40, out)
+        self.assertNotIn("WORKER_ASK_VISION_TOKEN", out)
+        self.assertNotIn("WAV_PROBE_TEST", out)
+        # O env nao foi esvaziado: heranca normal + config do filho seguem.
+        self.assertIn("PATH=", out)
+        self.assertIn("WORKER_ASK_MIN_TIMEOUT=", out)
 
     def test_worker_exit_75(self):
         _, port = self._start(self.fake_75)
