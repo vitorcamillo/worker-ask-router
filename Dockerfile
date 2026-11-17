@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3 bash ca-certificates tini procps git \
+        python3 bash ca-certificates tini procps git curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g \
@@ -59,6 +59,8 @@ WORKDIR /home/worker
 EXPOSE 3000
 VOLUME ["/home/worker"]
 
+# O healthcheck do Coolify (Dockerfile build pack) roda curl/wget dentro do
+# container e sobrescreve este; por isso o curl esta no apt acima.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD python3 -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3000/healthz',timeout=4).status==200 else 1)"
 
