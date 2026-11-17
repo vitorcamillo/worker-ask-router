@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+umask 077
+
+mkdir -p \
+    "$HOME/.local/bin" \
+    "$HOME/.local/share/zcode-worker/auth" \
+    "$HOME/.local/share/zcode-cli/glm/provider" \
+    "$HOME/.local/state/zcode-worker/auth" \
+    "$HOME/.config/zcode-worker"
+
+ln -sfn /opt/worker-ask/bin/zcode_headless_admit.py "$HOME/.local/bin/zcode_headless_admit.py"
+ln -sfn /opt/worker-ask/adapters/zcode/auth/launch.cjs "$HOME/.local/share/zcode-worker/auth/launch.cjs"
+ln -sfn /opt/worker-ask/adapters/zcode/auth/zai-session.cjs "$HOME/.local/share/zcode-worker/auth/zai-session.cjs"
+ln -sfn /opt/worker-ask/bin/zcode-cli "$HOME/.local/bin/zcode-cli"
+
+SECRET_FILE="$HOME/.config/zcode-worker/credential-secret"
+if [ ! -e "$SECRET_FILE" ]; then
+    head -c 48 /dev/urandom > "$SECRET_FILE"
+fi
+export ZCODE_CREDENTIAL_SECRET_FILE="$SECRET_FILE"
+
+VERSION_FILE="$HOME/.local/share/zcode-cli/glm/VERSION"
+if [ -f "$VERSION_FILE" ]; then
+    ZCODE_APP_VERSION="$(head -n 1 "$VERSION_FILE")"
+    export ZCODE_APP_VERSION
+fi
+
+exec "$@"

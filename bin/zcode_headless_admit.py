@@ -18,6 +18,18 @@ from pathlib import Path
 
 MIN_MEM_KIB = 4 * 1024 * 1024
 MAX_PARALLEL = 16
+
+
+def min_mem_kib() -> int:
+    """Memória mínima em KiB, ajustável por ZCODE_ADMIT_MIN_MEM_MIB em runtime."""
+    raw = os.environ.get("ZCODE_ADMIT_MIN_MEM_MIB")
+    if raw is not None and raw.isdecimal():
+        value = int(raw)
+        if value >= 256:
+            return value * 1024
+    return MIN_MEM_KIB
+
+
 DEFAULT_TIMEOUT = 30.0
 LOCK_NAMES = ("cli-headless.lock", "cli-headless-{slot}.lock")
 
@@ -71,7 +83,7 @@ def read_mem_available(path: Path = Path("/proc/meminfo")) -> bool:
     except (OSError, UnicodeError) as exc:
         raise _error("fonte de memoria indisponivel") from exc
     match = re.search(r"^MemAvailable:\s*(\d+)\s+kB\s*$", text, re.MULTILINE)
-    if match is None or int(match.group(1)) < MIN_MEM_KIB:
+    if match is None or int(match.group(1)) < min_mem_kib():
         raise _error("memoria disponivel insuficiente")
     return True
 
