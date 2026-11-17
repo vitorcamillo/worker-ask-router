@@ -31,6 +31,18 @@ def stat(pid: int) -> tuple[str, int, int, str] | None:
     return comm, int(f[1]), int(f[11]) + int(f[12]), f[19]
 
 
+def rss_kb(pid: int) -> int:
+    """VmRSS do processo em kB; 0 se ele já saiu."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as arquivo:
+            for linha in arquivo:
+                if linha.startswith("VmRSS"):
+                    return int(linha.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
 def tree(root: int, procs: dict[int, tuple]) -> list[int]:
     """Lista root e todos os descendentes (MCP via npx/wrapper tem netos)."""
     out, todo = [], [root]
@@ -63,8 +75,7 @@ def main() -> int:
         if any(k and k in cmd for k in KEEP) or now - since < IDLE_MIN * 60:
             continue
         kids = tree(pid, procs)
-        rss = sum(int(l.split()[1]) for p in kids for l in open(f"/proc/{p}/status")
-                  if l.startswith("VmRSS")) // 1024
+        rss = sum(rss_kb(p) for p in kids) // 1024
         print(f"{'[dry] ' if dry else ''}encerrando pid={pid} ({rss} MB, ocioso "
               f"{(now - since) / 60:.0f} min): {cmd[:100]}")
         freed += rss

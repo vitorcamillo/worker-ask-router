@@ -48,6 +48,9 @@ def main():
         shutil.copy2(TESTS, stage / "tests/test_worker_router.py")
         for helper in ("quota_reset.py", "quota_provider.py", "availability.py", "conftest.py"):
             shutil.copy2(ROOT / helper, stage / helper)
+        # test_ordem_do_servico_e_permutacao_valida lê o ordem.json real do serviço
+        (stage / "servico").mkdir()
+        shutil.copy2(ROOT / "servico/ordem.json", stage / "servico/ordem.json")
         (stage / "pytest.ini").write_text("[pytest]\ntestpaths=tests\n")
         env = {k: v for k, v in os.environ.items() if not k.startswith("COVERAGE_")}
         def run(selection=None):
