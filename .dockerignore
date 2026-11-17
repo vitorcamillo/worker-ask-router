@@ -14,9 +14,9 @@ adapters/zcode/out
 pontes
 docs
 scripts
-.env*
-auth.json
-credentials.json
+**/.env*
+**/auth.json
+**/credentials.json
 systemd
 servico/test_*.py
 conftest.py
@@ -26,3 +26,20 @@ adapters/zcode/docs
 adapters/zcode/.pytest_cache
 Dockerfile
 .dockerignore
+
+# Paridade com o .gitignore para o que e sensivel e fica fora do git: um
+# build local na arvore de trabalho nao pode levar nada disto para a imagem.
+# scripts/check_docker_context.py falha o build se algum desses aparecer.
+**/api-key
+**/*.key
+**/*.db*
+**/*.sqlite*
+**/*.log
+**/*.bak*
+**/sessions
+**/runtime
+**/node_modules
+**/.venv
+**/.claude
+**/.ruff_cache
+**/.worker-ask-isolation

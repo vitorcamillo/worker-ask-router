@@ -1,0 +1,1 @@
+- 592cc0e: alem de copiar o repo filtrado pelo .dockerignore, o COPY . passou a levar para a imagem (e para o PATH via /opt/worker-ask/bin) executaveis que a lista fixa anterior excluia (muse-ask, codex-local, bonsai-ask, ask-check, ask-doctor, zcode-mcp-reaper e adapters/zcode/bin), deixando o Muse elegivel no servico quando WAV_NO_MUSE=0 (o padrao da imagem continua 1).
