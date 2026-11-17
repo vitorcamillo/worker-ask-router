@@ -21,9 +21,10 @@ def _padroes_do_repo(mod):
 def test_dockerignore_do_repo_segura_o_sensivel_e_deixa_o_repo_entrar():
     mod = _modulo()
     padroes = _padroes_do_repo(mod)
-    dentro = ["worker_router.py", "bin/muse-ask", "adapters/zcode/bin/worker-bridge"]
+    dentro = ["worker_router.py", "bin/claude-ask", "adapters/zcode/bin/worker-bridge"]
     fora = [
-        "tests/test_x.py", "adapters/outro/x", ".env.local", "sub/auth.json",
+        "tests/test_x.py", "adapters/outro/x", "adapters/bonsai/scripts/gpu_coord.py",
+        "bin/bonsai-ask", "bin/muse-ask", ".env.local", "sub/auth.json",
         "api-key", "sub/dir/api-key", "chave.key", "run.db-wal", "state.sqlite3",
         "app.log", "novo.bak2", "sessions/sessao.json", "runtime/x.json",
         "node_modules/pacote/index.js", ".venv/bin/python", ".claude/checkpoint.json",

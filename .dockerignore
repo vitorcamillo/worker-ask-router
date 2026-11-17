@@ -43,3 +43,7 @@ Dockerfile
 **/.claude
 **/.ruff_cache
 **/.worker-ask-isolation
+
+# Fora do servico: bonsai (LLM local, so na maquina do dono) e Muse (desligado no container).
+bin/bonsai-ask
+bin/muse-ask

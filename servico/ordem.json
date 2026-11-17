@@ -1,4 +1,4 @@
 {
-  "provedores": ["opencode", "claude", "codex", "muse", "zcode"],
+  "provedores": ["opencode", "claude", "codex", "zcode"],
   "opencode": ["deepseek-v4.1-flash", "gpt-6-luna", "claude-haiku-5-5", "mimo-v2.6-flash", "qwen3.8-flash", "deepseek-v4.1-flash-free", "beam-free"]
 }
