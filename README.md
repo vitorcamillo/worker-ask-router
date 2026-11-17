@@ -2,6 +2,10 @@
 
 [Licença MIT](LICENSE) · [Como contribuir](CONTRIBUTING.md)
 
+![Demonstração do worker-ask-router](docs/demo.png)
+
+*`ask-doctor` conferindo a cadeia de wrappers (Codex, Claude, ZCode, Muse e OpenCode) antes de rotear tarefas.*
+
 Repositório único do roteador e de todos os wrappers `-ask` locais. Não contém código do iptzao nem de outro projeto.
 
 ## Fontes
