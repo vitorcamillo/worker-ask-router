@@ -18,12 +18,10 @@ RUN groupadd --gid 10001 worker \
     && mkdir -p /home/worker \
     && chown worker:worker /home/worker
 
-COPY worker_router.py availability.py quota_provider.py quota_reset.py worker_isolation.py /opt/worker-ask/
-COPY bin/opencode-ask bin/claude-ask bin/codex-ask bin/ask_presentation.py /opt/worker-ask/bin/
-COPY bin/zcode-cli bin/zcode-worker bin/zcode_headless_admit.py /opt/worker-ask/bin/
-COPY adapters/zcode/auth/launch.cjs adapters/zcode/auth/zai-session.cjs /opt/worker-ask/adapters/zcode/auth/
-COPY adapters/zcode/src/zcode_worker/ /opt/worker-ask/adapters/zcode/src/zcode_worker/
-COPY servico/vision_bridge.py servico/ordem.json servico/entrypoint.sh /opt/worker-ask/servico/
+# O repo inteiro, filtrado pelo .dockerignore (sem testes, pontes, units e docs):
+# arquivo novo do worker-ask entra sem editar esta lista. As CLIs acima ficam
+# com versao fixa; o cache de camadas do build so reinstala quando ela muda.
+COPY . /opt/worker-ask/
 
 RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
     && chmod 755 /opt/worker-ask/worker_router.py \

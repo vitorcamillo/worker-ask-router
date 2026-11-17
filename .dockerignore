@@ -17,3 +17,12 @@ scripts
 .env*
 auth.json
 credentials.json
+systemd
+servico/test_*.py
+conftest.py
+*.ini
+migration-sources.json
+adapters/zcode/docs
+adapters/zcode/.pytest_cache
+Dockerfile
+.dockerignore
