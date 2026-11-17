@@ -8,8 +8,9 @@ bancos, logs, sessions/, runtime/, .claude/, .worker-ask-isolation) que o
 regras do .dockerignore (subconjunto do docker: `*`, `?`, `**`, `!` e padrao
 com barra final; vale o ultimo padrao que casa, default entrar) sobre a
 arvore de --root (padrao: o repo do script), conta o contexto resultante e
-sai 1 se algum caminho sensivel entrar, 0 se nenhum. `--listar` imprime o
-contexto inteiro, um caminho por linha.
+sai 1 se algum caminho sensivel aparecer na arvore, mesmo excluido do
+contexto pelo .dockerignore (o gate exige arvore limpa no build), 0 se
+nenhum. `--listar` imprime o contexto inteiro, um caminho por linha.
 
 Somente stdlib; sem privilegios, contas ou rede; nada e gravado na arvore.
 """
@@ -97,15 +98,20 @@ def excluido(caminho, padroes):
     return fora
 
 
-def contexto(root):
-    """Caminhos relativos (posix) que o `COPY .` levaria da arvore em root."""
-    padroes = carregar((root / ".dockerignore").read_text(encoding="utf-8"))
+def arvore(root):
+    """Caminhos relativos (posix) de todos os arquivos da arvore em root."""
     for base, diretorios, arquivos in os.walk(root):
         diretorios.sort()
         for nome in sorted(arquivos):
-            caminho = Path(base, nome).relative_to(root).as_posix()
-            if not excluido(caminho, padroes):
-                yield caminho
+            yield Path(base, nome).relative_to(root).as_posix()
+
+
+def contexto(root):
+    """Caminhos relativos (posix) que o `COPY .` levaria da arvore em root."""
+    padroes = carregar((root / ".dockerignore").read_text(encoding="utf-8"))
+    for caminho in arvore(root):
+        if not excluido(caminho, padroes):
+            yield caminho
 
 
 def main(argv=None):
@@ -134,15 +140,20 @@ def main(argv=None):
         total += 1
         if listar:
             print(caminho)
+    # O gate vale para a arvore inteira, nao so o contexto: sensivel presente
+    # no build falha mesmo se o .dockerignore ja o exclui da imagem (o
+    # proprio .dockerignore promete esse comportamento no comentario dele).
+    for caminho in arvore(root):
         rotulo = next((r for r, busca in SENSIVEIS if busca.search(caminho)), None)
         if rotulo:
             ofensores.append((caminho, rotulo))
     if ofensores:
         print(f"check_docker_context: {len(ofensores)} caminho(s) sensivel(is) "
-              "no contexto de build:", file=sys.stderr)
+              "na arvore de build:", file=sys.stderr)
         for caminho, rotulo in ofensores:
             print(f"  {caminho} ({rotulo})", file=sys.stderr)
-        print("  corrija o .dockerignore antes de construir a imagem", file=sys.stderr)
+        print("  limpe a arvore ou corrija o .dockerignore antes de construir "
+              "a imagem", file=sys.stderr)
         return 1
     print(f"check_docker_context: contexto de build com {total} arquivos, "
           "nenhum sensivel")
