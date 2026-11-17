@@ -331,7 +331,10 @@ def test_enable_without_systemctl_adds_warning(tmp_path, monkeypatch, capsys):
     output = json.loads(capsys.readouterr().out)
     assert code == 0
     assert output["avisos"] == ["systemctl ausente"]
-    assert output["habilitadas"] == list(installer.ENABLE)
+    # sem systemctl nada foi habilitado de verdade: units ficam nao_verificadas
+    assert output["habilitadas"] == []
+    assert output["nao_verificadas"] == list(installer.ENABLE)
+    assert output["falhas_enable"] == []
 
 
 def test_enable_with_fake_systemctl(tmp_path, monkeypatch, capsys):
@@ -365,10 +368,37 @@ def test_enable_with_fake_systemctl(tmp_path, monkeypatch, capsys):
         if unit == "ask-check.timer":
             continue
         assert any(f"enable --now {unit}" in line for line in calls)
+    # 1a execucao mudou pontes e units: try-restart dos servicos alcancados
+    assert output["reiniciados"] == [f"{n}.service" for n in installer.SERVICOS_PONTE]
     capsys.readouterr()
     assert installer.main(["--home", str(home), "--enable"]) == 0
     calls = log.read_text().splitlines()
-    assert sum(line == "--user daemon-reload" for line in calls) == 1
+    # daemon-reload roda sempre que ha --enable, mesmo sem mudanca nas units
+    assert sum(line == "--user daemon-reload" for line in calls) == 2
+    # 2a execucao idempotente: nenhum try-restart novo
+    assert sum("try-restart" in line for line in calls) == len(installer.SERVICOS_PONTE)
+
+
+def test_enable_daemon_reload_failure_is_a_warning(tmp_path, monkeypatch, capsys):
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    log = tmp_path / "systemctl.log"
+    script = fake / "systemctl"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{log}"\n'
+        'if [ "$2" = "daemon-reload" ]; then exit 5; fi\n'
+        'if [ "$2" = "is-enabled" ]; then exit 1; fi\n'
+        'exit 0\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("WORKER_ASK_NO_SYSTEMCTL", raising=False)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    home = tmp_path / "home"
+    assert installer.main(["--home", str(home), "--enable"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["avisos"] == ["daemon-reload rc=5"]
+    assert output["habilitadas"] == list(installer.ENABLE)
 
 
 def test_unit_uses_newest_nvm_node_when_not_on_path(tmp_path, monkeypatch):
@@ -382,3 +412,35 @@ def test_unit_uses_newest_nvm_node_when_not_on_path(tmp_path, monkeypatch):
     installer.install(home)
     content = (home / ".config/systemd/user/worker-ask-disponibilidade.service").read_text()
     assert "%h/.local/bin:%h/.nvm/versions/node/v22.22.2/bin:" in content
+
+
+def test_unit_prefers_nvm_over_path_node(tmp_path, monkeypatch):
+    """O caminho do node nao pode depender do PATH de quem roda o instalador:
+    com nvm presente, o node do PATH (ex.: /usr/bin) e ignorado."""
+    monkeypatch.delenv("NODE_BIN_DIR", raising=False)
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: "/usr/bin/node")
+    home = tmp_path / "home"
+    node = home / ".nvm/versions/node/v22.22.2/bin/node"
+    node.parent.mkdir(parents=True)
+    node.write_text("")
+    installer.install(home)
+    content = (home / ".config/systemd/user/worker-ask-disponibilidade.service").read_text()
+    assert "%h/.local/bin:%h/.nvm/versions/node/v22.22.2/bin:" in content
+    assert "/usr/bin/node" not in content and "@NODE_BIN_DIR@" not in content
+
+
+def test_servicos_afetados_por_codigo_e_unidade(tmp_path):
+    bin_dir = tmp_path / ".local/bin"
+    systemd = tmp_path / ".config/systemd/user"
+    afetados = installer._servicos_afetados([
+        str(bin_dir / "ask-gpt-bridge.py"),
+        str(bin_dir / "ask_bridge_stream.py"),
+        str(systemd / "ask-claude-bridge.service"),
+        str(systemd / "ask-claude-bridge.service.d" / "90-harness.conf"),
+        str(bin_dir / "zcode-worker"),
+        str(systemd / "ask-check.service"),
+    ])
+    # ask_bridge_* e compartilhado: alcancam as tres pontes
+    assert afetados == ["ask-claude-bridge.service", "ask-glm-bridge.service",
+                        "ask-gpt-bridge.service"]
+    assert installer._servicos_afetados([]) == []

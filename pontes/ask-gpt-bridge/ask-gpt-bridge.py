@@ -317,6 +317,24 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             print("[gpt-bridge] cliente desconectou antes da resposta", flush=True)
 
+    def _conferir_origem(self):
+        """POST so de cliente local direto: bloqueia navegador (CSRF/DNS rebinding).
+
+        Host tem que ser o loopback desta porta; cabecalho Origin presente
+        (navegador) = recusa; Content-Type application/json impede o POST no-cors
+        com text/plain carregando JSON.
+        """
+        porta = getattr(self.server, "server_port", None) or PORT
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in (f"127.0.0.1:{porta}", f"localhost:{porta}",
+                        "127.0.0.1", "localhost"):
+            raise ErroEntrada("Host invalido (use 127.0.0.1 ou localhost)")
+        if self.headers.get("Origin"):
+            raise ErroEntrada("Origin nao permitido")
+        tipo = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if tipo != "application/json":
+            raise ErroEntrada("Content-Type deve ser application/json")
+
     def _ler_corpo(self) -> dict:
         """Le e valida o corpo JSON (dict); Content-Length/corpo invalido = 400."""
         bruto = self.headers.get("Content-Length")
@@ -354,6 +372,7 @@ class Handler(BaseHTTPRequestHandler):
         modelo = ""
         stream_ativo = False
         try:
+            self._conferir_origem()
             corpo = self._ler_corpo()
             effort = corpo.get("reasoning_effort")
             if effort is not None:

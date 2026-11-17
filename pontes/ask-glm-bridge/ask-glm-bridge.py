@@ -564,6 +564,24 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": {"message": "rota desconhecida"}})
 
+    def _conferir_origem(self):
+        """POST so de cliente local direto: bloqueia navegador (CSRF/DNS rebinding).
+
+        Host tem que ser o loopback desta porta; cabecalho Origin presente
+        (navegador) = recusa; Content-Type application/json impede o POST no-cors
+        com text/plain carregando JSON.
+        """
+        porta = getattr(self.server, "server_port", None) or PORT
+        host = (self.headers.get("Host") or "").strip().lower()
+        if host not in (f"127.0.0.1:{porta}", f"localhost:{porta}",
+                        "127.0.0.1", "localhost"):
+            raise ErroEntrada("Host invalido (use 127.0.0.1 ou localhost)")
+        if self.headers.get("Origin"):
+            raise ErroEntrada("Origin nao permitido")
+        tipo = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if tipo != "application/json":
+            raise ErroEntrada("Content-Type deve ser application/json")
+
     def _ler_corpo(self) -> dict:
         """Corpo JSON da requisicao: Content-Length valido e objeto; senao ErroEntrada."""
         bruto_len = self.headers.get("Content-Length")
@@ -632,6 +650,7 @@ class Handler(BaseHTTPRequestHandler):
         cwd = None
         stream_iniciado = False
         try:
+            self._conferir_origem()
             corpo = self._ler_corpo()
             modelo, texto, modo, cwd = self._preparar(
                 corpo.get("model", _SEM_MODEL), corpo.get("messages"))
@@ -698,6 +717,7 @@ class Handler(BaseHTTPRequestHandler):
         stream_iniciado = False
         self._sse = None
         try:
+            self._conferir_origem()
             corpo = self._ler_corpo()
             messages = anth.anthropic_para_chat(corpo)
             effort = anth.effort_de_corpo(corpo)

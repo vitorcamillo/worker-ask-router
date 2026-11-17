@@ -132,7 +132,9 @@ def _node_bin_dir(home: Path) -> str:
     configured = os.environ.get("NODE_BIN_DIR")
     if configured:
         return configured
-    node = shutil.which("node") or _nvm_node(home)
+    # nvm mais novo antes do PATH: o caminho não pode depender do shell que
+    # executa o instalador (com/sem nvm carregado gerariam units diferentes)
+    node = _nvm_node(home) or shutil.which("node")
     if node:
         directory = str(Path(node).resolve().parent)
         prefix = str(home)
@@ -284,19 +286,43 @@ def _run_systemctl(systemctl: str, *args):
                           timeout=SYSTEMCTL_TIMEOUT)
 
 
-def enable_units(units_alteradas: bool):
-    result = {"habilitadas": [], "ja_habilitadas": [], "falhas_enable": [], "avisos": []}
+SERVICOS_PONTE = ("ask-claude-bridge", "ask-glm-bridge", "ask-gpt-bridge")
+
+
+def _servicos_afetados(caminhos) -> list:
+    """Servicos cujo codigo (pontes) ou unit mudou e precisam try-restart.
+
+    A unit instalada de cada ponte e a copia em ~/.local/bin; modulos ask_bridge_*
+    sao compartilhados, entao qualquer mudanca neles alcanca as tres pontes.
+    """
+    afetados = set()
+    for caminho in map(Path, caminhos):
+        for ponte in SERVICOS_PONTE:
+            servico = f"{ponte}.service"
+            if servico in caminho.parts or caminho.name.startswith(ponte) \
+                    or caminho.name.startswith("ask_bridge_"):
+                afetados.add(servico)
+    return sorted(afetados)
+
+
+def enable_units(servicos_alterados=()):
+    result = {"habilitadas": [], "ja_habilitadas": [], "falhas_enable": [],
+              "nao_verificadas": [], "reiniciados": [], "avisos": []}
     systemctl = shutil.which("systemctl")
     if os.environ.get("WORKER_ASK_NO_SYSTEMCTL") == "1" or systemctl is None:
         if systemctl is None:
+            # sem systemctl nada foi habilitado: nao listar como habilitadas
             result["avisos"].append("systemctl ausente")
-        result["habilitadas"].extend(ENABLE)
+            result["nao_verificadas"].extend(ENABLE)
+        else:
+            result["habilitadas"].extend(ENABLE)  # simulacao explicita
         return result
-    if units_alteradas:
-        try:
-            _run_systemctl(systemctl, "daemon-reload")
-        except (OSError, subprocess.TimeoutExpired) as error:
-            result["avisos"].append(f"daemon-reload falhou: {error}")
+    try:
+        reload = _run_systemctl(systemctl, "daemon-reload")
+        if reload.returncode != 0:
+            result["avisos"].append(f"daemon-reload rc={reload.returncode}")
+    except (OSError, subprocess.TimeoutExpired) as error:
+        result["avisos"].append(f"daemon-reload falhou: {error}")
     for unit in ENABLE:
         try:
             probe = _run_systemctl(systemctl, "is-enabled", unit)
@@ -314,6 +340,15 @@ def enable_units(units_alteradas: bool):
                 result["falhas_enable"].append(unit)
         except (OSError, subprocess.TimeoutExpired):
             result["falhas_enable"].append(unit)
+    for unit in servicos_alterados:
+        try:
+            action = _run_systemctl(systemctl, "try-restart", unit)
+            if action.returncode == 0:
+                result["reiniciados"].append(unit)
+            else:
+                result["avisos"].append(f"try-restart {unit} rc={action.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as error:
+            result["avisos"].append(f"try-restart {unit} falhou: {error}")
     return result
 
 
@@ -337,7 +372,7 @@ def main(argv=None):
         print(f"instalação recusada: {error}", file=sys.stderr)
         return 1
     if args.enable:
-        result.update(enable_units(result["units_alteradas"]))
+        result.update(enable_units(_servicos_afetados(result["installed"])))
     print(json.dumps(result, ensure_ascii=False))
     return 1 if result.get("falhas_enable") else 0
 
