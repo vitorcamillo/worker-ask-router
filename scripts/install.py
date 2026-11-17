@@ -198,7 +198,8 @@ def check(home: Path, repo: Path = ROOT):
     return {"pendentes": pendentes, "total": len(pendentes)}
 
 
-def install(home: Path, repo: Path = ROOT):
+def install(home: Path, repo: Path = ROOT, manter_diferentes: bool = False):
+    """Instala o que difere do repo; com manter_diferentes, só faltando/modo (diferente fica)."""
     home = home.absolute()
     repo = repo.resolve()
     items = entries(repo, home)
@@ -213,8 +214,13 @@ def install(home: Path, repo: Path = ROOT):
             raise RuntimeError("outra instalação está em andamento") from None
         preflight(items, state)
         changes = [(s, d, k, m) for s, d, k, m in items if not unchanged(s, d, k, m, home)]
+        mantidos = []
+        if manter_diferentes:
+            mantidos = [str(d) for s, d, k, m in changes
+                        if _pending_state(s, d, k, m, home) in ("diferente", "link-errado")]
+            changes = [c for c in changes if str(c[1]) not in mantidos]
         if not changes:
-            return {"installed": [], "backup": None, "units_alteradas": False}
+            return {"installed": [], "backup": None, "units_alteradas": False, "mantidos": mantidos}
         backup = state / "install-backups" / uuid.uuid4().hex
         _parents(backup)
         backup.mkdir(parents=True, mode=0o700)
@@ -276,7 +282,8 @@ def install(home: Path, repo: Path = ROOT):
             for temp in staged:
                 temp.unlink(missing_ok=True)
         return {"installed": [str(d) for _s, d, _k, _m in changes], "backup": str(backup),
-                "units_alteradas": any(k == "unit" for _s, _d, k, _m in changes)}
+                "units_alteradas": any(k == "unit" for _s, _d, k, _m in changes),
+                "mantidos": mantidos}
     finally:
         os.close(lock)
 
@@ -357,6 +364,8 @@ def main(argv=None):
     parser.add_argument("--home", type=Path, default=Path.home())
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--enable", action="store_true")
+    parser.add_argument("--manter-diferentes", action="store_true",
+                        help="instala só faltando/modo; diferente e link-errado ficam como estão")
     args = parser.parse_args(argv)
     if args.check:
         try:
@@ -367,7 +376,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
         return 1 if result["total"] else 0
     try:
-        result = install(args.home)
+        result = install(args.home, manter_diferentes=args.manter_diferentes)
     except (OSError, RuntimeError) as error:
         print(f"instalação recusada: {error}", file=sys.stderr)
         return 1

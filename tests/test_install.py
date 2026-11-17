@@ -39,7 +39,7 @@ def test_install_all_wrappers_core_regular_and_idempotence(tmp_path, monkeypatch
     assert (home / ".local/share/bonsai/scripts/gpu_coord.py").is_symlink()
     assert key.read_text() == "synthetic-private-state"
     assert result["installed"]
-    assert installer.install(home) == {"installed": [], "backup": None, "units_alteradas": False}
+    assert installer.install(home) == {"installed": [], "backup": None, "units_alteradas": False, "mantidos": []}
     assert len(list((home / ".local/state/worker-ask/install-backups").iterdir())) == 1
 
 
@@ -262,6 +262,30 @@ def test_check_reports_wrong_copy_mode(tmp_path):
     assert pending["destino"] == str(dest)
 
 
+def test_manter_diferentes_instala_so_faltando_e_modo(tmp_path):
+    home = tmp_path / "home"
+    installer.install(home)
+    diferente = home / ".local/bin/ask_bridge_stream.py"
+    diferente.write_text("versao local\n")
+    modo = home / ".local/bin/ask_bridge_process.py"
+    modo.chmod(0o755)
+    faltando = home / ".local/bin/ask_bridge_zcode_live.py"
+    faltando.unlink()
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/install.py"), "--home", str(home), "--manter-diferentes"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert p.returncode == 0, p.stderr
+    data = json.loads(p.stdout)
+    assert sorted(data["installed"]) == sorted([str(modo), str(faltando)])
+    assert data["mantidos"] == [str(diferente)]
+    assert diferente.read_text() == "versao local\n"
+    assert stat.S_IMODE(modo.stat().st_mode) == 0o644 and faltando.is_file()
+    again = installer.install(home, manter_diferentes=True)
+    assert again["installed"] == [] and again["mantidos"] == [str(diferente)]
+    assert installer.install(home)["installed"] == [str(diferente)]
+
+
 def test_check_missing_source_is_an_error(tmp_path):
     with pytest.raises(RuntimeError, match="fonte"):
         installer.check(tmp_path / "home", tmp_path / "empty-repo")
@@ -307,7 +331,7 @@ def test_second_install_is_idempotent_and_units_unchanged(tmp_path):
     first = installer.install(home)
     assert first["units_alteradas"] is True
     second = installer.install(home)
-    assert second == {"installed": [], "backup": None, "units_alteradas": False}
+    assert second == {"installed": [], "backup": None, "units_alteradas": False, "mantidos": []}
 
 
 def test_enable_simulated_lists_all_units(tmp_path, monkeypatch, capsys):

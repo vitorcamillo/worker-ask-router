@@ -23,6 +23,7 @@ MUTATIONS = (
     ("unit-fallback", 'return "%h/.local/bin"', 'return "%h/.local/share"', "unit_falls_back"),
     ("check-mode", "if stat.S_IMODE(info.st_mode) != mode:", "if False:", "wrong_copy_mode"),
     ("check-missing", 'return "faltando"', "return None", "check_reports_missing"),
+    ("manter-diferentes", "        if manter_diferentes:\n", "        if False:\n", "manter_diferentes"),
 )
 
 
