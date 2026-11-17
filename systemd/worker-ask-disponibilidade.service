@@ -1,0 +1,9 @@
+[Unit]
+Description=worker-ask: atualiza a tabela de disponibilidade dos workers (cota por provedor)
+
+[Service]
+Type=oneshot
+Environment="PATH=%h/.local/bin:@NODE_BIN_DIR@:/usr/local/bin:/usr/bin:/bin"
+Environment="ASK_PRESENTATION_ACTIVE=1"
+ExecStart=%h/.local/bin/worker-ask --refresh-availability
+TimeoutStartSec=45

@@ -1,0 +1,9 @@
+[Unit]
+Description=ask-limites-zcode a cada 2 minutos
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Roda zcode-mcp-reaper a cada 2 minutos
+
+[Timer]
+OnStartupSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

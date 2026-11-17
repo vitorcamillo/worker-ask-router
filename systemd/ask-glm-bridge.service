@@ -1,0 +1,14 @@
+[Unit]
+Description=ask-glm-bridge: HTTP local (OpenAI-compatible) -> CLI do ZCode (GLM via plano, OAuth zcode)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="ASK_BRIDGE_MODE=edit"
+ExecStart=/usr/bin/python3 %h/.local/bin/ask-glm-bridge.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

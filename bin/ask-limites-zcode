@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""ask-limites-zcode — mostra os limites reais de Claude e ChatGPT no nome do provider do ZCode.
+
+Fontes (nenhuma gasta cota):
+  - ChatGPT: `codex app-server` -> account/rateLimits/read, com o CODEX_HOME nativo da ponte GPT.
+  - Claude:  cache em ~/.local/state/ask-bridges/claude-limits.json, gravado pela statusline do
+             Claude Code e pela ask-claude-bridge a cada conversa com streaming.
+
+Altera SO o campo providerName de claude-code e chatgpt-codex em ~/.zcode/v2/provider_config.json,
+respeitando o lock do ZCode (<arquivo>.lock/owner-*.json) e gravando via tmp + rename.
+Rodado por ask-limites-zcode.timer (a cada 2 min). `--dry-run` so imprime os nomes.
+
+Outros modos (usados pelo install.sh e pelo ask-doctor):
+  --registrar  grava/repara os providers claude-code e chatgpt-codex no provider_config.json
+               (idempotente; faz backup antes; preserva o resto do arquivo e o modelo padrao).
+  --checar     exit 0 se os dois providers estao registrados com config de modelo completa.
+"""
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+
+CONFIG = os.environ.get("ASK_ZCODE_PROVIDER_CONFIG") or os.path.expanduser("~/.zcode/v2/provider_config.json")
+CLAUDE_CACHE = os.path.expanduser("~/.local/state/ask-bridges/claude-limits.json")
+CODEX_HOME = os.path.expanduser("~/.config/ask-gpt-bridge/codex-home")
+NOMES = {"claude-code": "Claude Code", "chatgpt-codex": "ChatGPT (Codex)"}
+CACHE_VELHO_S = 30 * 60
+
+# Providers pessoais: o ZCode exige config de modelo COMPLETA em manualProviderModelRules —
+# faltou um campo, ele descarta o arquivo inteiro em silencio (ZodError engolido).
+PROVIDERS = {
+    "claude-code": {"porta": 10111, "contexto": 200000, "saida": 64000,
+                    "modelos": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1",
+                                "claude-haiku-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]},
+    "chatgpt-codex": {"porta": 10112, "contexto": 400000, "saida": 128000,
+                      "modelos": ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-terra",
+                                  "gpt-5.6-sol", "gpt-5.6-luna"]},
+}
+
+
+def hora(ts) -> str:
+    """Epoch em segundos -> HH:MM local."""
+    return time.strftime("%H:%M", time.localtime(float(ts)))
+
+
+def rotulo(p5h, psem, reset5h, reset_sem=None) -> str:
+    """Monta '5h 35% · sem 32%', com horario de volta quando a janela esta quase cheia."""
+    partes = [f"5h {round(p5h)}%" + (f" (volta {hora(reset5h)})" if p5h >= 90 and reset5h else "")]
+    partes.append(f"sem {round(psem)}%" + (f" (volta {hora(reset_sem)})" if psem >= 90 and reset_sem else ""))
+    return " · ".join(partes)
+
+
+def nome_janela(mins) -> str:
+    """Duracao da janela em minutos -> '5h', 'sem', '30d'."""
+    mins = int(mins or 0)
+    if mins == 10080:
+        return "sem"
+    if mins and mins % 1440 == 0:
+        return f"{mins // 1440}d"
+    return f"{mins // 60}h" if mins and mins % 60 == 0 else f"{mins}m"
+
+
+def rotulo_janelas(janelas) -> str:
+    """Rotula pelas duracoes reais (a OpenAI pode mandar so a semanal em `primary`)."""
+    partes = []
+    for w in sorted(janelas, key=lambda w: int(w.get("windowDurationMins") or 0)):
+        pct = w.get("usedPercent", 0)
+        reset = w.get("resetsAt")
+        nome = nome_janela(w.get("windowDurationMins"))
+        if pct >= 90 and reset:
+            fmt = "%H:%M" if nome.endswith("h") else "%d/%m %H:%M"
+            nome_pct = f"{nome} {round(pct)}% (volta {time.strftime(fmt, time.localtime(float(reset)))})"
+        else:
+            nome_pct = f"{nome} {round(pct)}%"
+        partes.append(nome_pct)
+    return " · ".join(partes)
+
+
+def limites_gpt():
+    """Le a cota do plano ChatGPT pelo app-server do codex (sem gerar nada)."""
+    env = dict(os.environ, CODEX_HOME=CODEX_HOME)
+    p = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+    fila = queue.Queue()
+    threading.Thread(target=lambda: [fila.put(linha) for linha in p.stdout], daemon=True).start()
+
+    def envia(obj):
+        p.stdin.write(json.dumps(obj) + "\n")
+        p.stdin.flush()
+
+    try:
+        envia({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": {"clientInfo": {"name": "ask-limites-zcode", "version": "1"}}})
+        envia({"jsonrpc": "2.0", "method": "initialized"})
+        envia({"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read"})
+        fim = time.time() + 25
+        while time.time() < fim:
+            try:
+                msg = json.loads(fila.get(timeout=1))
+            except (queue.Empty, ValueError):
+                continue
+            if msg.get("id") == 2:
+                rl = (msg.get("result") or {}).get("rateLimits") or {}
+                janelas = [rl[k] for k in ("primary", "secondary") if rl.get(k)]
+                if not janelas:
+                    return None
+                return rotulo_janelas(janelas)
+        return None
+    finally:
+        p.terminate()
+
+
+def limites_claude():
+    """Le o ultimo rate_limits que a statusline do Claude Code salvou."""
+    try:
+        cache = json.load(open(CLAUDE_CACHE))
+    except (OSError, ValueError):
+        return None
+    rl = cache.get("rate_limits") or {}
+    fh, sd = rl.get("five_hour") or {}, rl.get("seven_day") or {}
+    if not fh and not sd:
+        return None
+    txt = rotulo(fh.get("used_percentage", 0), sd.get("used_percentage", 0),
+                 fh.get("resets_at"), sd.get("resets_at"))
+    idade = time.time() - cache.get("at", 0) / 1000
+    return txt + (f" (há {int(idade // 60)} min)" if idade > CACHE_VELHO_S else "")
+
+
+def com_lock(func):
+    """Executa func segurando o mesmo lock de diretorio que o ZCode usa."""
+    lock = CONFIG + ".lock"
+    token = f"{os.getpid()}-{int(time.time() * 1000)}-askl"
+    for _ in range(40):
+        try:
+            os.mkdir(lock)
+            break
+        except FileExistsError:
+            time.sleep(0.2)
+    else:
+        return False  # ZCode ocupado: tenta no proximo ciclo
+    dono = os.path.join(lock, f"owner-{token}.json")
+    try:
+        with open(dono, "x") as f:
+            f.write(json.dumps({"pid": os.getpid(), "createdAt": int(time.time() * 1000), "token": token}) + "\n")
+        return func()
+    finally:
+        try:
+            os.remove(dono)
+        except OSError:
+            pass
+        try:
+            os.rmdir(lock)
+        except OSError:
+            pass
+
+
+def grava(cfg: dict) -> None:
+    """Grava o provider_config.json atomico (tmp + rename) com permissao 600."""
+    tmp = os.path.join(os.path.dirname(CONFIG), f".provider_config.json.{os.getpid()}.askl.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, CONFIG)
+
+
+def aplica(novos: dict) -> bool:
+    """Troca so os providerName que mudaram."""
+    cfg = json.load(open(CONFIG))
+    mudou = False
+    for regra in cfg["config"]["providerConfigRules"]["providerRules"]:
+        nome = novos.get(regra.get("providerId"))
+        if nome and regra.get("providerName") != nome:
+            regra["providerName"] = nome
+            mudou = True
+    if mudou:
+        grava(cfg)
+    return mudou
+
+
+def config_modelo(p: dict) -> dict:
+    """Config completa de um modelo servido por ponte local (so texto, tool call, reasoning high)."""
+    return {"enabled": True,
+            "properties": {"requiresMfjsToolSchema": False, "contextWindow": p["contexto"],
+                           "inputFormat": {"supportsText": True, "supportsImage": False,
+                                           "supportsVideo": False, "supportsAudio": False,
+                                           "supportsPdf": False},
+                           "outputFormat": {"supportsText": True}, "supportsToolCall": True,
+                           "supportsJsonSchemaOutput": False, "supportsNativeWebSearch": False,
+                           "supportsMidConversationSystem": False},
+            "optionSpecs": {"reasoningLevel": {"values": ["high"], "map": "{}"},
+                            "maxOutputTokens": {"max": p["saida"],
+                                                "map": "{'max_tokens': maxOutputTokens}"}}}
+
+
+def config_vazia() -> dict:
+    """Arquivo pessoal minimo, igual ao que o ZCode cria."""
+    return {"schemaVersion": 1, "config": {
+        "providerOrder": [], "providerConfigRules": {"providerRules": []},
+        "modelConfigRules": {"providerModelRules": [], "manualProviderModelRules": []}}}
+
+
+def regra_ok(regra: dict, pid: str) -> bool:
+    """Regra do provider aponta para a ponte certa e lista todos os modelos."""
+    p, cfg = PROVIDERS[pid], regra.get("config") or {}
+    api = cfg.get("api") or {}
+    return (cfg.get("group") == "standard-personal" and regra.get("enabled", True) is True
+            and api.get("type") == "openai-chat-completions"
+            and api.get("baseUrl") == f"http://127.0.0.1:{p['porta']}/v1"
+            and set(p["modelos"]) <= set(cfg.get("personalModelIds") or []))
+
+
+def modelo_ok(cfgm) -> bool:
+    """Config de modelo COMPLETA, como o loader do app exige (ZodError em qualquer campo faltando
+    derruba o arquivo inteiro: 'Personal Provider Config 加载失败' no log do ZCode)."""
+    if not isinstance(cfgm, dict) or cfgm.get("enabled") is not True:
+        return False
+    props, specs = cfgm.get("properties"), cfgm.get("optionSpecs")
+    if not isinstance(props, dict) or not isinstance(specs, dict):
+        return False
+    # campos que o loader do app exige (lista tirada do ZodError real). O proprio app reescreve o
+    # arquivo tirando os campos iguais ao padrao (supportsText, supportsToolCall...), entao nao exigir esses.
+    return (all(isinstance(props.get(k), bool) for k in
+                ("supportsJsonSchemaOutput", "supportsNativeWebSearch", "supportsMidConversationSystem"))
+            and isinstance(props.get("contextWindow"), int)
+            and isinstance(props.get("inputFormat"), dict)
+            and bool((specs.get("reasoningLevel") or {}).get("values"))
+            and isinstance((specs.get("maxOutputTokens") or {}).get("max"), int))
+
+
+def registra() -> bool:
+    """Garante os dois providers (regra + modelos); so reescreve o que estiver faltando ou quebrado."""
+    cfg = json.load(open(CONFIG)) if os.path.exists(CONFIG) else config_vazia()
+    antes = json.dumps(cfg, sort_keys=True)
+    c = cfg["config"]
+    regras = c.setdefault("providerConfigRules", {}).setdefault("providerRules", [])
+    mcr = c.setdefault("modelConfigRules", {})
+    mcr.setdefault("providerModelRules", [])
+    manuais = mcr.setdefault("manualProviderModelRules", [])
+    ordem = c.setdefault("providerOrder", [])
+    for pid, p in PROVIDERS.items():
+        velha = next((r for r in regras if r.get("providerId") == pid), None)
+        if velha is None or not regra_ok(velha, pid):
+            nova = {"providerId": pid, "providerName": (velha or {}).get("providerName") or NOMES[pid],
+                    "enabled": True,
+                    "config": {"group": "standard-personal",
+                               "access": {"type": "api-key", "apiKey": "local-bridge"},
+                               "api": {"type": "openai-chat-completions",
+                                       "baseUrl": f"http://127.0.0.1:{p['porta']}/v1"},
+                               "personalModelIds": list(p["modelos"]),
+                               "modelOrder": list(p["modelos"])}}
+            regras[:] = [r for r in regras if r.get("providerId") != pid] + [nova]
+        # "inteligente" e "manual" nao podem coexistir para o mesmo provider/modelo
+        mcr["providerModelRules"] = [m for m in mcr["providerModelRules"] if m.get("providerId") != pid]
+        for modelo in p["modelos"]:
+            atual = next((m for m in manuais
+                          if m.get("providerId") == pid and m.get("modelId") == modelo), None)
+            if atual is None or not modelo_ok(atual.get("config")):
+                manuais[:] = [m for m in manuais if m is not atual] + [
+                    {"providerId": pid, "modelId": modelo, "config": config_modelo(p)}]
+        if pid not in ordem:
+            ordem.append(pid)
+    if json.dumps(cfg, sort_keys=True) == antes:
+        return False
+    if os.path.exists(CONFIG):
+        bak = f"{CONFIG}.bak-{time.strftime('%Y%m%d-%H%M%S')}-ask-registrar"
+        with open(CONFIG, "rb") as src, open(bak, "wb") as dst:
+            dst.write(src.read())
+        os.chmod(bak, 0o600)
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    grava(cfg)
+    return True
+
+
+def checa() -> list:
+    """Lista problemas do registro (vazia = ok)."""
+    try:
+        c = json.load(open(CONFIG))["config"]
+    except (OSError, ValueError, KeyError) as e:
+        return [f"provider_config.json ilegivel: {e}"]
+    probs = []
+    regras = {r.get("providerId"): r for r in c.get("providerConfigRules", {}).get("providerRules", [])}
+    manuais = {(m.get("providerId"), m.get("modelId")): m.get("config")
+               for m in c.get("modelConfigRules", {}).get("manualProviderModelRules", [])}
+    for pid, p in PROVIDERS.items():
+        if pid not in regras:
+            probs.append(f"{pid}: nao registrado")
+            continue
+        if not regra_ok(regras[pid], pid):
+            probs.append(f"{pid}: regra divergente (ponte/porta/modelos)")
+        for m in p["modelos"]:
+            if not modelo_ok(manuais.get((pid, m))):
+                probs.append(f"{pid}/{m}: config de modelo ausente/invalida (ZCode descartaria o arquivo)")
+    return probs
+
+
+def main() -> int:
+    """Consulta os limites e atualiza os nomes (ou so imprime, com --dry-run)."""
+    if "--checar" in sys.argv:
+        probs = checa()
+        for p in probs:
+            print(p)
+        return 1 if probs else 0
+    if "--registrar" in sys.argv:
+        resultado = com_lock(registra)
+        if resultado is False and checa():
+            print("nao consegui gravar (ZCode segurando o lock?) — rode de novo", file=sys.stderr)
+            return 1
+        print("providers ZCode: " + ("registrados/reparados" if resultado else "ja estavam ok"))
+    elif "--dry-run" not in sys.argv:
+        # auto-reparo: provider registrado com config quebrada faz o app descartar o arquivo
+        # inteiro. So dispara se houver config QUEBRADA; ai o --registrar garante os dois providers.
+        quebrados = [p for p in checa() if "nao registrado" not in p]
+        if quebrados:
+            print("auto-reparo: " + "; ".join(quebrados), file=sys.stderr)
+            com_lock(registra)
+    novos = {}
+    for pid, fonte in (("claude-code", limites_claude), ("chatgpt-codex", limites_gpt)):
+        try:
+            txt = fonte()
+        except Exception as e:  # noqa: BLE001 - fonte fora do ar nao pode derrubar o timer
+            print(f"{pid}: falha ao ler limites: {e}", file=sys.stderr)
+            txt = None
+        novos[pid] = f"{NOMES[pid]} · {txt}" if txt else NOMES[pid]
+    for pid, nome in novos.items():
+        print(f"{pid}: {nome}")
+    if "--dry-run" in sys.argv:
+        return 0
+    if not os.path.exists(CONFIG):
+        print("provider_config.json nao existe", file=sys.stderr)
+        return 1
+    resultado = com_lock(lambda: aplica(novos))
+    print("atualizado" if resultado else "sem mudanca (ou ZCode ocupado)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

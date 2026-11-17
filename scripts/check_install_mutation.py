@@ -18,6 +18,11 @@ MUTATIONS = (
     ("restore-old", "os.replace(saved, dest)", "pass", "failure_restores_previous"),
     ("remove-new", "dest.unlink(missing_ok=True)", "pass", "failed_fresh_install"),
     ("concurrent-lock", "fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)", "pass", "lock_refuses_concurrent"),
+    ("copy-mode", "temp.chmod(mode)", "temp.chmod(0o755)", "copies_bridges"),
+    ("unit-render", 'return text.replace("@NODE_BIN_DIR@", _node_bin_dir(home)).encode("utf-8")', 'return text.encode("utf-8")', "unit_renders_node_bin_dir"),
+    ("unit-fallback", 'return "%h/.local/bin"', 'return "%h/.local/share"', "unit_falls_back"),
+    ("check-mode", "if stat.S_IMODE(info.st_mode) != mode:", "if False:", "wrong_copy_mode"),
+    ("check-missing", 'return "faltando"', "return None", "check_reports_missing"),
 )
 
 
@@ -59,7 +64,7 @@ def main():
             print(name, "killed" if killed else "survived", flush=True)
     out = ROOT / "out-installer"
     out.mkdir(exist_ok=True)
-    report = {"scope": "five targeted installer invariants; not exhaustive",
+    report = {"scope": "ten targeted installer invariants; not exhaustive",
               "source_sha256": hashlib.sha256(SOURCE.read_bytes()).hexdigest(),
               "results": results, "mutation_score_pct": 100 * sum(x["killed"] for x in results) / len(results)}
     (out / "mutation.json").write_text(json.dumps(report, indent=2) + "\n")

@@ -1,0 +1,7 @@
+[Unit]
+Description=Atualiza limites de Claude/ChatGPT no nome dos providers do ZCode
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ask-limites-zcode
+TimeoutStartSec=60

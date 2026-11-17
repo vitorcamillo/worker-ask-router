@@ -1,0 +1,6 @@
+[Unit]
+Description=Encerra MCPs ociosos do app ZCode (reconectam sozinhos no proximo uso)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/zcode-mcp-reaper

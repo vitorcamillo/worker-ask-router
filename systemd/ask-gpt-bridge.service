@@ -1,0 +1,13 @@
+[Unit]
+Description=ask-gpt-bridge: HTTP local (OpenAI-compatible) -> Codex oficial (ChatGPT nativo)
+After=network-online.target
+
+[Service]
+Type=simple
+Environment="PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ExecStart=/usr/bin/python3 %h/.local/bin/ask-gpt-bridge.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Encerra MCPs ociosos do app desktop do ZCode.
+
+O host do app (zcode-cli filho de zcode-host-*) sobe um conjunto de MCPs por sessao e so
+libera ao excluir a sessao. Este script mata o filho que ficou IDLE_MIN minutos sem gastar CPU (tolerancia TOL ticks por rodada);
+o ZCode reconecta sozinho na proxima chamada de ferramenta (adapters/src/mcp/index.ts, callTool).
+Uso: zcode-mcp-reaper [--dry-run]   (rodado pelo timer systemd zcode-mcp-reaper.timer)
+"""
+import json
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+IDLE_MIN = float(os.environ.get("ZCODE_REAPER_IDLE_MIN", "10"))
+TOL = int(os.environ.get("ZCODE_REAPER_TOL_TICKS", "25"))  # JVM ociosa gasta ~8 ticks/2min
+KEEP = tuple(os.environ.get("ZCODE_REAPER_KEEP", "zcode-node-repl-mcp,/cli/exec/").split(","))
+STATE = Path.home() / ".cache/zcode-mcp-reaper/state.json"
+BOOT = Path("/proc/sys/kernel/random/boot_id").read_text().strip()[:8]
+
+
+def stat(pid: int) -> tuple[str, int, int, str] | None:
+    """Retorna (comm, ppid, cpu_ticks, starttime) de /proc/<pid>/stat."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    comm = raw[raw.index("(") + 1 : raw.rindex(")")]
+    f = raw[raw.rindex(")") + 2 :].split()
+    return comm, int(f[1]), int(f[11]) + int(f[12]), f[19]
+
+
+def tree(root: int, procs: dict[int, tuple]) -> list[int]:
+    """Lista root e todos os descendentes (MCP via npx/wrapper tem netos)."""
+    out, todo = [], [root]
+    while todo:
+        p = todo.pop()
+        out.append(p)
+        todo += [c for c, s in procs.items() if s[1] == p]
+    return out
+
+
+def main() -> int:
+    dry = "--dry-run" in sys.argv
+    procs = {int(p): s for p in os.listdir("/proc") if p.isdigit() and (s := stat(int(p)))}
+    hosts = [p for p, s in procs.items()
+             if s[0] == "zcode-cli" and procs.get(s[1], ("",))[0].startswith("zcode-host")]
+    try:
+        old = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        old = {}
+    now, new, freed = time.time(), {}, 0
+    for pid, s in procs.items():
+        if s[1] not in hosts:
+            continue
+        cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        key = f"{BOOT}:{pid}:{s[3]}"
+        ticks = sum(procs[p][2] for p in tree(pid, procs))
+        prev = old.get(key)
+        since = prev[1] if prev and ticks - prev[0] <= TOL else now
+        new[key] = [ticks, since]
+        if any(k and k in cmd for k in KEEP) or now - since < IDLE_MIN * 60:
+            continue
+        kids = tree(pid, procs)
+        rss = sum(int(l.split()[1]) for p in kids for l in open(f"/proc/{p}/status")
+                  if l.startswith("VmRSS")) // 1024
+        print(f"{'[dry] ' if dry else ''}encerrando pid={pid} ({rss} MB, ocioso "
+              f"{(now - since) / 60:.0f} min): {cmd[:100]}")
+        freed += rss
+        for p in ([] if dry else kids):
+            try:
+                os.kill(p, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if not dry:
+            new.pop(key, None)
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(new))
+    if freed:
+        print(f"total liberado: {freed} MB")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

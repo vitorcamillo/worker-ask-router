@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Smoke test das pontes ask-claude-bridge (10111) e ask-gpt-bridge (10112), como o ZCode usa.
+
+Manda Chat Completions com stream e `tools` (formato do ZCode), pedindo para ler um arquivo do
+cwd: o modelo precisa usar a ferramenta nativa do CLI. Confere SSE, progresso, resposta e [DONE].
+Uso: ask-bridges-smoke [claude|gpt|all]. Exit 0 = tudo passou.
+"""
+import json, os, sys, tempfile, time, urllib.request
+
+CASOS = {"claude": (10111, "claude-haiku-5-5", {"X-Claude-Mode": "plan"}),
+         "gpt": (10112, "gpt-5.6-luna", {})}
+TOOLS = [{"type": "function", "function": {"name": "read_file", "description": "Read a file",
+          "parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                         "required": ["path"]}}}]
+
+def roda(nome, porta, modelo, extra, cwd, palavra):
+    corpo = {"model": modelo, "stream": True, "tools": TOOLS, "reasoning_effort": "low",
+             "messages": [{"role": "system", "content": "Você é um assistente de código."},
+                          {"role": "user", "content": "Leia o arquivo segredo.txt no diretório "
+                           "de trabalho e responda só com a palavra que está nele."}]}
+    req = urllib.request.Request(f"http://127.0.0.1:{porta}/v1/chat/completions",
+                                 json.dumps(corpo).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Ask-Cwd": cwd, **extra})
+    t0, primeiro, raciocinio, conteudo, fim, done = time.time(), None, "", "", None, False
+    with urllib.request.urlopen(req, timeout=600) as r:
+        for raw in r:
+            linha = raw.decode().strip()
+            if not linha.startswith("data:"):
+                continue
+            dado = linha[5:].strip()
+            primeiro = primeiro or time.time() - t0
+            if dado == "[DONE]":
+                done = True; break
+            ch = (json.loads(dado).get("choices") or [{}])[0]
+            d = ch.get("delta") or {}
+            raciocinio += d.get("reasoning_content") or ""
+            conteudo += d.get("content") or ""
+            fim = ch.get("finish_reason") or fim
+    checks = {"stream terminou com [DONE]": done, "finish_reason=stop": fim == "stop",
+              "progresso ao vivo (raciocínio)": bool(raciocinio.strip()),
+              "resposta com a palavra do arquivo": palavra in conteudo,
+              "sem tool_calls devolvidas ao cliente": "tool_calls" not in conteudo}
+    print(f"\n[{nome}] {modelo}: 1º chunk {primeiro:.1f}s, total {time.time() - t0:.1f}s")
+    for k, v in checks.items():
+        print(f"  {'PASS' if v else 'FAIL'}  {k}")
+    print(f"  resposta: {conteudo.strip()[:80]!r}")
+    return all(checks.values())
+
+def main():
+    alvo = sys.argv[1] if len(sys.argv) > 1 else "all"
+    cache = os.path.expanduser("~/.local/state/ask-bridges/claude-limits.json")
+    antes = os.path.getmtime(cache) if os.path.exists(cache) else 0
+    ok = True
+    with tempfile.TemporaryDirectory() as cwd:
+        palavra = f"girassol{int(time.time()) % 10000}"
+        open(os.path.join(cwd, "segredo.txt"), "w").write(palavra + "\n")
+        for nome, (porta, modelo, extra) in CASOS.items():
+            if alvo in ("all", nome):
+                ok &= roda(nome, porta, modelo, extra, cwd, palavra)
+    if alvo in ("all", "claude"):
+        novo = os.path.exists(cache) and os.path.getmtime(cache) > antes
+        print(f"\n  {'PASS' if novo else 'FAIL'}  cache de limites do Claude atualizado")
+        ok &= novo
+    return 0 if ok else 1
+
+if __name__ == "__main__":
+    sys.exit(main())

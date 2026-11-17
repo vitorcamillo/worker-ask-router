@@ -1,0 +1,9 @@
+[Unit]
+Description=Diario: ask-check as 09h (com catch-up se a maquina estava desligada)
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

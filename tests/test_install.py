@@ -2,6 +2,7 @@
 import errno
 import fcntl
 import importlib.util
+import json
 import os
 from pathlib import Path
 import stat
@@ -38,7 +39,7 @@ def test_install_all_wrappers_core_regular_and_idempotence(tmp_path, monkeypatch
     assert (home / ".local/share/bonsai/scripts/gpu_coord.py").is_symlink()
     assert key.read_text() == "synthetic-private-state"
     assert result["installed"]
-    assert installer.install(home) == {"installed": [], "backup": None}
+    assert installer.install(home) == {"installed": [], "backup": None, "units_alteradas": False}
     assert len(list((home / ".local/state/worker-ask/install-backups").iterdir())) == 1
 
 
@@ -134,7 +135,7 @@ def test_cli_staged_home_and_error(tmp_path):
 def test_partial_source_tree_is_rejected_before_install(tmp_path):
     repo = tmp_path / "repo"
     home = tmp_path / "home"
-    for source, _dest, _copy in installer.entries(repo, home):
+    for source, _dest, _kind, _mode in installer.entries(repo, home):
         if source.name != "features.py":
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_text("fixture-code")
@@ -222,3 +223,162 @@ def test_restore_cross_device_via_dest_temp_preserves_backup(tmp_path, monkeypat
     backups = list((tmp_path / ".local/state/worker-ask/install-backups").glob("*/.local/bin/worker-ask"))
     assert len(backups) == 1 and backups[0].read_text() == "old-worker-ask"
     assert not list(binary.glob(".*.restore-*"))
+
+
+def test_check_reports_missing_without_writing(tmp_path):
+    home = tmp_path / "home"
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/install.py"), "--check", "--home", str(home)],
+        capture_output=True, text=True, timeout=10,
+    )
+    data = json.loads(p.stdout)
+    assert p.returncode == 1
+    assert data["total"] == len(installer.entries(ROOT, home.absolute()))
+    assert {item["estado"] for item in data["pendentes"]} == {"faltando"}
+    assert not home.exists()
+
+
+def test_check_is_clean_after_install(tmp_path):
+    home = tmp_path / "home"
+    installer.install(home)
+    p = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/install.py"), "--check", "--home", str(home)],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert p.returncode == 0
+    assert json.loads(p.stdout) == {"pendentes": [], "total": 0}
+
+
+def test_check_reports_wrong_copy_mode(tmp_path):
+    home = tmp_path / "home"
+    installer.install(home)
+    dest = home / ".local/bin/ask_bridge_process.py"
+    dest.chmod(0o755)
+    result = installer.check(home)
+    assert result["total"] == 1
+    pending = result["pendentes"][0]
+    assert pending["estado"] == "modo"
+    assert pending["tipo"] == "copy"
+    assert pending["destino"] == str(dest)
+
+
+def test_check_missing_source_is_an_error(tmp_path):
+    with pytest.raises(RuntimeError, match="fonte"):
+        installer.check(tmp_path / "home", tmp_path / "empty-repo")
+
+
+def test_install_copies_bridges_with_modes(tmp_path):
+    home = tmp_path / "home"
+    installer.install(home)
+    for name in ("ask-claude-bridge.py", "ask-gpt-bridge.py", "ask-glm-bridge.py", "ask-bridges-smoke"):
+        path = home / ".local/bin" / name
+        assert path.is_file() and not path.is_symlink()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755
+    for name in ("ask_bridge_anthropic.py", "ask_bridge_process.py",
+                 "ask_bridge_stream.py", "ask_bridge_zcode_live.py"):
+        path = home / ".local/bin" / name
+        assert path.is_file() and not path.is_symlink()
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_unit_renders_node_bin_dir_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("NODE_BIN_DIR", "/opt/node/bin")
+    home = tmp_path / "home"
+    installer.install(home)
+    unit = home / ".config/systemd/user/ask-check.service"
+    content = unit.read_text()
+    assert "/opt/node/bin" in content
+    assert "@NODE_BIN_DIR@" not in content
+    assert stat.S_IMODE(unit.stat().st_mode) == 0o644
+
+
+def test_unit_falls_back_to_home_local_bin_without_node(tmp_path, monkeypatch):
+    monkeypatch.delenv("NODE_BIN_DIR", raising=False)
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
+    home = tmp_path / "home"
+    installer.install(home)
+    content = (home / ".config/systemd/user/worker-ask-disponibilidade.service").read_text()
+    assert "@NODE_BIN_DIR@" not in content
+    assert "%h/.local/bin:%h/.local/bin:" in content
+
+
+def test_second_install_is_idempotent_and_units_unchanged(tmp_path):
+    home = tmp_path / "home"
+    first = installer.install(home)
+    assert first["units_alteradas"] is True
+    second = installer.install(home)
+    assert second == {"installed": [], "backup": None, "units_alteradas": False}
+
+
+def test_enable_simulated_lists_all_units(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("WORKER_ASK_NO_SYSTEMCTL", "1")
+    home = tmp_path / "home"
+    code = installer.main(["--home", str(home), "--enable"])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["habilitadas"] == list(installer.ENABLE)
+    assert len(output["habilitadas"]) == 7
+    assert output["falhas_enable"] == []
+
+
+def test_enable_without_systemctl_adds_warning(tmp_path, monkeypatch, capsys):
+    original_which = installer.shutil.which
+    monkeypatch.delenv("WORKER_ASK_NO_SYSTEMCTL", raising=False)
+    monkeypatch.setattr(installer.shutil, "which",
+                        lambda name: None if name == "systemctl" else original_which(name))
+    home = tmp_path / "home"
+    code = installer.main(["--home", str(home), "--enable"])
+    output = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert output["avisos"] == ["systemctl ausente"]
+    assert output["habilitadas"] == list(installer.ENABLE)
+
+
+def test_enable_with_fake_systemctl(tmp_path, monkeypatch, capsys):
+    fake = tmp_path / "fake-bin"
+    fake.mkdir()
+    log = tmp_path / "systemctl.log"
+    script = fake / "systemctl"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$*" >> "{log}"\n'
+        'if [ "$1" = "--user" ] && [ "$2" = "is-enabled" ]; then\n'
+        '  if [ "$3" = "ask-check.timer" ]; then echo enabled; exit 0; fi\n'
+        '  exit 1\n'
+        'fi\n'
+        'exit 0\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.delenv("WORKER_ASK_NO_SYSTEMCTL", raising=False)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    home = tmp_path / "home"
+    assert installer.main(["--home", str(home), "--enable"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["ja_habilitadas"] == ["ask-check.timer"]
+    assert "ask-check.timer" not in output["habilitadas"]
+    assert len(output["habilitadas"]) == len(installer.ENABLE) - 1
+    calls = log.read_text().splitlines()
+    assert sum(line == "--user daemon-reload" for line in calls) == 1
+    assert not any("enable --now ask-check.timer" in line for line in calls)
+    assert sum("enable --now" in line for line in calls) == len(installer.ENABLE) - 1
+    for unit in installer.ENABLE:
+        if unit == "ask-check.timer":
+            continue
+        assert any(f"enable --now {unit}" in line for line in calls)
+    capsys.readouterr()
+    assert installer.main(["--home", str(home), "--enable"]) == 0
+    calls = log.read_text().splitlines()
+    assert sum(line == "--user daemon-reload" for line in calls) == 1
+
+
+def test_unit_uses_newest_nvm_node_when_not_on_path(tmp_path, monkeypatch):
+    monkeypatch.delenv("NODE_BIN_DIR", raising=False)
+    monkeypatch.setattr(installer.shutil, "which", lambda _name: None)
+    home = tmp_path / "home"
+    for versao in ("v9.11.2", "v22.22.2", "v18.20.0"):
+        node = home / ".nvm/versions/node" / versao / "bin/node"
+        node.parent.mkdir(parents=True)
+        node.write_text("")
+    installer.install(home)
+    content = (home / ".config/systemd/user/worker-ask-disponibilidade.service").read_text()
+    assert "%h/.local/bin:%h/.nvm/versions/node/v22.22.2/bin:" in content
