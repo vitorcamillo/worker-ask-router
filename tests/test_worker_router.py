@@ -1145,3 +1145,14 @@ def test_wrapper_chain_segue_ordem_do_painel(tmp_path, monkeypatch):
                  '{"provedores": [["zcode"], "muse", "opencode", "codex", "claude"]}'):
         arq.write_text(ruim)
         assert [n for _, n in wr.wrapper_chain("claude", True, "write")] == [*wr._ORDEM_PADRAO, "zcode"]
+
+
+def test_ordem_do_servico_e_permutacao_valida(monkeypatch):
+    # Regressao do servico: o ordem.json entregue sem "muse" era rejeitado em
+    # silencio (nao e permutacao exata) e o container caia na ordem padrao,
+    # com zcode primeiro. O arquivo do servico tem que valer como salvo.
+    arq = ROOT / "servico" / "ordem.json"
+    monkeypatch.setenv("WORKER_ASK_ORDEM", str(arq))
+    salvo = json.loads(arq.read_text(encoding="utf-8"))["provedores"]
+    assert sorted(salvo) == sorted(wr._ORDEM_PADRAO)
+    assert wr._ordem_provedores() == tuple(salvo)

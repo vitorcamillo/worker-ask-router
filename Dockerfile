@@ -38,6 +38,9 @@ RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
 # No Coolify, defina WAV_ALLOWED_HOSTS com o hostname pelo qual o cliente
 # interno (phantoraCaptcha) chama este servico na rede Docker; sem ela so
 # 127.0.0.1/localhost passam na checagem de Host e o cliente recebe 421.
+# O muse-ask fica fora da imagem (filtro do .dockerignore): mantenha
+# WAV_NO_MUSE=1. Sobrescrever para 0 faz o degrau muse da cadeia falhar
+# por binario ausente em vez de omitir o degrau.
 ENV HOME=/home/worker \
     PATH=/opt/worker-ask/bin:$PATH \
     WORKER_ASK_ORDEM=/opt/worker-ask/servico/ordem.json \
