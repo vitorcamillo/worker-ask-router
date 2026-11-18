@@ -1,5 +1,7 @@
 """Regressao do gate de contexto de build: matcher do .dockerignore e falha com sensivel."""
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,9 +38,22 @@ def test_dockerignore_do_repo_segura_o_sensivel_e_deixa_o_repo_entrar():
         assert mod.excluido(caminho, padroes), caminho
 
 
-def test_repo_atual_deve_passar(capsys):
+def test_repo_atual_deve_passar(tmp_path, capsys):
+    # Copia so o versionado: a arvore de trabalho local sempre tem artefatos
+    # ignorados pelo git (.ruff_cache, out/*.log, .claude/, marcador de
+    # isolamento) que o gate recusa de proposito num build real.
+    rastreados = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=ROOT, check=True,
+        capture_output=True, timeout=30).stdout.decode().split("\0")
+    for rel in filter(None, rastreados):
+        origem = ROOT / rel
+        if not origem.exists() and not origem.is_symlink():
+            continue  # removido na arvore e ainda nao commitado
+        destino = tmp_path / rel
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(origem, destino, follow_symlinks=False)
     mod = _modulo()
-    assert mod.main(["--root", str(ROOT)]) == 0
+    assert mod.main(["--root", str(tmp_path)]) == 0
     assert "nenhum sensivel" in capsys.readouterr().out
 
 
