@@ -53,6 +53,7 @@ ENV HOME=/home/worker \
     WAV_ORCHESTRATOR=claude \
     WAV_WORKER_ASK=worker-ask \
     ZCODE_ADMIT_MIN_MEM_MIB=1024 \
+    ZCODE_CREDENTIAL_SECRET_FILE=/home/worker/.config/zcode-worker/credential-secret \
     ZCODE_WORKER_CONTEXT_CLI=/opt/worker-ask/bin/zcode-cli \
     ZCODE_WORKER_CONTEXT_PROVIDER_CONFIG=/home/worker/.local/state/zcode-worker/auth/.zcode/v2/provider_config.json \
     PYTHONDONTWRITEBYTECODE=1

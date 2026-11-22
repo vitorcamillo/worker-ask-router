@@ -16,6 +16,10 @@ if [ -z "${ZCODE_APP_VERSION:-}" ]; then
     ls -1 "$HOME/.zcode/v2/runtime/provider/linux-x86_64" 2>/dev/null |
       grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
   )"
+  # Container sem app desktop: o runtime é 0.0.0-dev; usa a versão do bundle copiado.
+  if [ -z "$ZCODE_APP_VERSION" ] && [ -r "$HOME/.local/share/zcode-cli/glm/VERSION" ]; then
+    ZCODE_APP_VERSION="$(grep -m1 -E '^[0-9]+\.[0-9]+\.[0-9]+$' "$HOME/.local/share/zcode-cli/glm/VERSION")"
+  fi
   ZCODE_APP_VERSION="${ZCODE_APP_VERSION:-3.17.2}"
   export ZCODE_APP_VERSION
 fi

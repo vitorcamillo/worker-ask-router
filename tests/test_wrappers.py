@@ -753,3 +753,24 @@ class ClaudeAskContratoTest(WrapperTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_zcode_cli_usa_versao_do_bundle_sem_app_desktop(tmp_path):
+    """Sem runtime versionado (container), ZCODE_APP_VERSION vem de glm/VERSION."""
+    import os
+    import subprocess
+    home = tmp_path / "home"
+    glm = home / ".local/share/zcode-cli/glm"
+    glm.mkdir(parents=True)
+    (glm / "VERSION").write_text("3.18.2\n")
+    (glm / "zcode.cjs").write_text("")
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    node = fakebin / "node"
+    node.write_text('#!/bin/sh\necho "v=$ZCODE_APP_VERSION"\n')
+    node.chmod(0o755)
+    env = {"HOME": str(home), "PATH": str(fakebin) + ":/usr/bin:/bin"}
+    wrapper = Path(__file__).resolve().parents[1] / "bin" / "zcode-cli"
+    out = subprocess.run(["bash", str(wrapper), "--version"], env=env,
+                         capture_output=True, text=True, timeout=30)
+    assert "v=3.18.2" in out.stdout

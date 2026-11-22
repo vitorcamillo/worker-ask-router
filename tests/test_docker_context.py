@@ -77,3 +77,9 @@ def test_opcao_desconhecida_bloqueia_com_rc2(capsys):
     mod = _modulo()
     assert mod.main(["--coisa"]) == 2
     assert "opcao desconhecida" in capsys.readouterr().err
+
+
+def test_dockerfile_aponta_a_chave_da_credencial_do_zcode():
+    """Sem ZCODE_CREDENTIAL_SECRET_FILE o zcode-cli não decifra o login ("Select a model")."""
+    texto = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    assert "ZCODE_CREDENTIAL_SECRET_FILE=/home/worker/.config/zcode-worker/credential-secret" in texto
