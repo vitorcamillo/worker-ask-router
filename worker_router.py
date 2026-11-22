@@ -1381,13 +1381,35 @@ def _ordem_provedores():
     return _ORDEM_PADRAO
 
 
-def wrapper_chain(orchestrator, allow_muse, mode):
+def _parse_providers(raw):
+    """Lista de provedores de UMA chamada; None/vazio mantem a cadeia padrao."""
+    if raw is None:
+        return None
+    raw = raw.strip().lower()
+    if not raw:
+        return None
+    out = []
+    for name in raw.split(","):
+        name = name.strip()
+        if not name or name not in _ORDEM_PADRAO:
+            raise ValueError(f"provider invalido: {name or '(vazio)'}")
+        if name not in out:
+            out.append(name)
+    if not out:
+        raise ValueError("lista de providers vazia")
+    return tuple(out)
+
+
+def wrapper_chain(orchestrator, allow_muse, mode, providers=None):
     # A plataforma do orquestrador nao restringe o worker; recursao tem trava propria.
     wrappers = {"zcode": "zcode-worker", "muse": "muse-ask", "opencode": "opencode-ask",
                 "codex": "codex-ask", "claude": "claude-ask"}
-    chain = [(wrappers[n], n) for n in _ordem_provedores() if n != "muse" or allow_muse]
-    # Plano pago do ZCode: sempre o ultimo, fora da ordem salva pelo painel.
-    return chain + [(ZCODE_PAGO, "zcode")]
+    ordem = _ordem_provedores() if providers is None else providers
+    chain = [(wrappers[n], n) for n in ordem if n != "muse" or allow_muse]
+    # Plano pago do ZCode: sempre o ultimo, e so quando o zcode participa desta chamada.
+    if providers is None or "zcode" in providers:
+        chain.append((ZCODE_PAGO, "zcode"))
+    return chain
 
 
 def build_argv(name, path, mode, cwd):
@@ -1632,6 +1654,7 @@ def _main_impl(argv=None):
     parser = argparse.ArgumentParser(prog="worker-ask")
     parser.add_argument("--cwd")
     parser.add_argument("--mode", choices=["plan", "write"], default="write")
+    parser.add_argument("--providers", help="restringe esta chamada aos provedores listados (separados por virgula)")
     parser.add_argument("--spec")
     parser.add_argument("prompt", nargs="?")
     parser.add_argument("--timeout", type=float, default=1800.0)
@@ -1678,6 +1701,11 @@ def _main_impl(argv=None):
                 sys.exit(1)
             sys.exit(0)
     args = parser.parse_args(argv)
+
+    try:
+        providers = _parse_providers(args.providers)
+    except ValueError as e:
+        parser.error(str(e))
 
     if args.log is not None and _LOG_FD is None:
         try:
@@ -1878,7 +1906,12 @@ def _main_impl(argv=None):
         sys.exit(1)
 
     muse_excluded = args.no_muse or muse_opted_out(cwd)
-    chain = wrapper_chain(args.orchestrator, not muse_excluded, args.mode)
+    chain = wrapper_chain(args.orchestrator, not muse_excluded, args.mode, providers=providers)
+
+    if not chain:
+        # Restricao por chamada pode esvaziar a cadeia (ex.: so muse com muse excluido).
+        _event("stop", "erro: todos os workers indisponiveis", rc=75, detail="nenhum worker disponivel")
+        sys.exit(75)
 
     if args.task_id is not None:
         n_runs = _count_task_runs(args.task_id)

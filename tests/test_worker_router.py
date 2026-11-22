@@ -581,6 +581,59 @@ def test_zcode_pago_e_sempre_o_ultimo_degrau(allow_muse):
     assert [n for n, _ in ch].count("zcode-pago") == 1
 
 
+def test_wrapper_chain_providers_zcode_inclui_o_pago():
+    ch = wr.wrapper_chain("codex", False, "write", providers=("zcode",))
+    assert [n for _, n in ch] == ["zcode", "zcode"]
+    assert [w for w, _ in ch] == ["zcode-worker", "zcode-pago"]
+
+
+def test_wrapper_chain_providers_respeita_a_ordem_dada():
+    ch = wr.wrapper_chain("codex", False, "write", providers=("opencode", "zcode"))
+    assert [n for _, n in ch] == ["opencode", "zcode", "zcode"]
+    assert [w for w, _ in ch] == ["opencode-ask", "zcode-worker", "zcode-pago"]
+
+
+def test_wrapper_chain_providers_sem_zcode_nao_tem_pago():
+    ch = wr.wrapper_chain("codex", False, "write", providers=("opencode",))
+    assert [w for w, _ in ch] == ["opencode-ask"]
+
+
+def test_wrapper_chain_providers_muse_excluido_por_allow_muse():
+    assert [w for w, _ in wr.wrapper_chain("codex", False, "write", providers=("muse", "codex"))] == ["codex-ask"]
+    assert [w for w, _ in wr.wrapper_chain("codex", True, "write", providers=("muse", "codex"))] == [
+        "muse-ask", "codex-ask"]
+
+
+def test_wrapper_chain_sem_providers_igual_ao_padrao():
+    assert wr.wrapper_chain("claude", False, "write", providers=None) == wr.wrapper_chain("claude", False, "write")
+
+
+def test_parse_providers_normaliza_e_deduplica():
+    assert wr._parse_providers(None) is None
+    assert wr._parse_providers("") is None
+    assert wr._parse_providers(" ZCode , zcode") == ("zcode",)
+    assert wr._parse_providers("opencode,zcode") == ("opencode", "zcode")
+
+
+@pytest.mark.parametrize("raw", ["x", ",", "zcode,x", "zcode,,muse"])
+def test_parse_providers_invalidos(raw):
+    with pytest.raises(ValueError):
+        wr._parse_providers(raw)
+
+
+def test_cli_providers_invalido_rc2(fake_env):
+    result = run_cli(fake_env, ["--mode", "plan", "--providers", "x", "task"])
+    assert result.returncode == 2
+
+
+def test_cli_providers_so_muse_sem_muse_rc75_sem_executar(fake_env):
+    log = fake_env["tmp"] / "calls"
+    result = run_cli(fake_env, ["--mode", "plan", "--providers", "muse", "--no-muse", "task"],
+                     {"FAKE_LOG": str(log)})
+    assert result.returncode == 75
+    assert not log.exists()
+
+
 @pytest.mark.parametrize("allow_muse", [False, True])
 def test_codex_orchestrator_allows_luna_worker(allow_muse):
     names = [name for name, _ in wr.wrapper_chain("codex", allow_muse, "plan")]

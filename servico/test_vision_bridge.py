@@ -65,6 +65,12 @@ env
 exit 0
 """
 
+FAKE_ARGV = """#!/bin/sh
+cat > /dev/null
+echo "$@"
+exit 0
+"""
+
 
 def _write_exe(path, content):
     with open(path, "w", encoding="utf-8") as f:
@@ -86,10 +92,12 @@ class BridgeTest(unittest.TestCase):
         cls.fake_75 = os.path.join(d, "fake-75.sh")
         cls.fake_slow = os.path.join(d, "fake-slow.sh")
         cls.fake_sleep30 = os.path.join(d, "fake-sleep30.sh")
+        cls.fake_argv = os.path.join(d, "fake-argv.sh")
         _write_exe(cls.fake_ok, FAKE_OK)
         _write_exe(cls.fake_75, FAKE_75)
         _write_exe(cls.fake_slow, FAKE_SLOW)
         _write_exe(cls.fake_sleep30, FAKE_SLEEP30)
+        _write_exe(cls.fake_argv, FAKE_ARGV)
 
     @classmethod
     def tearDownClass(cls):
@@ -236,6 +244,36 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("POINT=1,2", obj["stdout"])
         self.assertIn("task-1", obj["stdout"])
         self.assertIn("yes", obj["stdout"])
+
+    def test_providers_forwarded_to_child(self):
+        _, port = self._start(self.fake_argv)
+        st, data = self._post(
+            port,
+            {"task_id": "prov1", "spec": "oi", "providers": ["zcode"]},
+            token=self.token,
+        )
+        self.assertEqual(st, 200)
+        self.assertIn("--providers zcode", json.loads(data)["stdout"])
+
+    def test_without_providers_field_no_flag(self):
+        _, port = self._start(self.fake_argv)
+        st, data = self._post(
+            port, {"task_id": "prov2", "spec": "oi"}, token=self.token
+        )
+        self.assertEqual(st, 200)
+        self.assertNotIn("--providers", json.loads(data)["stdout"])
+
+    def test_bad_providers_400(self):
+        _, port = self._start(self.fake_ok)
+        for bad in ("zcode", [], ["x"], ["zcode", "zcode"], [1]):
+            with self.subTest(providers=bad):
+                st, data = self._post(
+                    port,
+                    {"task_id": "prov3", "spec": "oi", "providers": bad},
+                    token=self.token,
+                )
+                self.assertEqual(st, 400)
+                self.assertEqual(json.loads(data), {"error": "bad providers"})
 
     def test_child_env_sanitized(self):
         fake = os.path.join(self.tmp.name, "fake-env.sh")

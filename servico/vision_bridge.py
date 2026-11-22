@@ -2,7 +2,8 @@
 """Servico HTTP de visao em container que expoe o roteador `worker-ask`.
 
 O phantoraCaptcha chama POST /v1/vision pela rede interna do Docker com
-task_id, spec, imagem base64 e timeout; o servico monta o comando
+task_id, spec, imagem base64, timeout e, opcionalmente, providers (lista de
+provedores para esta chamada, na ordem dada); o servico monta o comando
 `worker-ask` (stdin = spec) e devolve rc + stdout. GET /healthz e aberto
 sem auth; GET /healthz?clis=1 relata o estado de login dos CLIs.
 
@@ -42,6 +43,28 @@ DEFAULT_LOGIN_CHECKS = {
     "codex": ["codex", "login", "status"],
     "claude": ["claude", "auth", "status"],
 }
+# Restricao opcional de UMA chamada: nomes fechados, nunca texto livre no argv.
+ALLOWED_PROVIDERS = frozenset({"zcode", "opencode", "codex", "claude", "muse"})
+PROVIDER_RE = re.compile(r"[a-z]{1,16}")
+
+
+def _parse_providers_field(value):
+    """Campo `providers` do POST /v1/vision; ausente/null = cadeia padrao."""
+    if value is None:
+        return None
+    if not isinstance(value, list) or not 1 <= len(value) <= 5:
+        raise ValueError("providers invalidos")
+    out = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not PROVIDER_RE.fullmatch(item)
+            or item not in ALLOWED_PROVIDERS
+            or item in out
+        ):
+            raise ValueError("providers invalidos")
+        out.append(item)
+    return out
 
 
 def _parse_login_checks(raw):
@@ -423,11 +446,17 @@ def build_server(config: Config, token: str) -> ThreadingHTTPServer:
                 tv = config.max_timeout
             timeout_s = min(max(tv, config.min_timeout), config.max_timeout)
 
+            try:
+                providers = _parse_providers_field(obj.get("providers"))
+            except ValueError:
+                finish(400, {"error": "bad providers"}, task=task_id)
+                return
+
             if not sem.acquire(timeout=2):
                 finish(503, {"error": "busy"}, task=task_id)
                 return
             try:
-                rc, out = _run_worker(config, task_id, spec, img_bytes, ext, timeout_s)
+                rc, out = _run_worker(config, task_id, spec, img_bytes, ext, timeout_s, providers)
             finally:
                 try:
                     sem.release()
@@ -447,7 +476,8 @@ def build_server(config: Config, token: str) -> ThreadingHTTPServer:
     return server
 
 
-def _run_worker(config: Config, task_id: str, spec: str, img_bytes, ext: str, timeout_s: int):
+def _run_worker(config: Config, task_id: str, spec: str, img_bytes, ext: str, timeout_s: int,
+                providers=None):
     with tempfile.TemporaryDirectory(prefix="wav-") as tmpd:
         try:
             os.chmod(tmpd, 0o700)
@@ -467,6 +497,8 @@ def _run_worker(config: Config, task_id: str, spec: str, img_bytes, ext: str, ti
             "--step-timeout", str(timeout_s),
             "--task-id", task_id,
         ]
+        if providers:
+            cmd.extend(["--providers", ",".join(providers)])
         if config.no_muse:
             cmd.append("--no-muse")
         # O filho roda worker-ask e os CLIs de IA sobre imagem externa: nao
