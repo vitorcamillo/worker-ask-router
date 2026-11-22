@@ -299,7 +299,7 @@ def _slots_zcode():
         max_parallel = int(base._read_settings())
         pids = base.active_cli_pids()
         active = len(pids)
-        mem_ok = base._read_mem_available_bytes() >= base.MIN_MEM_AVAILABLE
+        mem_ok = base._read_mem_available_bytes() >= base.min_mem_available()
         return {
             "active": active,
             "max": max_parallel,

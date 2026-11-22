@@ -185,6 +185,22 @@ def test_slots_zcode(tmp_path, monkeypatch):
     assert av.slots("zcode-worker") is None
 
 
+def test_slots_zcode_respeita_piso_de_memoria_do_container(monkeypatch):
+    """ZCODE_ADMIT_MIN_MEM_MIB (Dockerfile: 1024) vale também na sonda de vagas."""
+    monkeypatch.delenv("WORKER_ASK_SLOT_PROBE", raising=False)
+    import zcode_worker.base as base
+
+    monkeypatch.setattr(base, "_read_settings", lambda: 1)
+    monkeypatch.setattr(base, "active_cli_pids", lambda *a, **k: [])
+    monkeypatch.setattr(
+        base, "_read_mem_available_bytes", lambda *a, **k: 3 * 1024 * 1024 * 1024
+    )
+    monkeypatch.delenv("ZCODE_ADMIT_MIN_MEM_MIB", raising=False)
+    assert av.slots("zcode-worker")["free"] is False
+    monkeypatch.setenv("ZCODE_ADMIT_MIN_MEM_MIB", "1024")
+    assert av.slots("zcode-worker")["free"] is True
+
+
 def test_slots_probe_desligada_e_demais_nomes(tmp_path, monkeypatch):
     monkeypatch.setenv("WORKER_ASK_SLOT_PROBE", "0")
     assert av.slots("zcode-worker") is None
