@@ -105,13 +105,23 @@ def main(argv):
         if not glob:
             r = run([npm, "root", "-g"], 60)
             glob = r.stdout.strip() if r.returncode == 0 else ""
-        installed, latest = {}, {}
+        installed, latest, pubs = {}, {}, {}
         for p in pkgs:
-            r = run([npm, "view", p, "version", "--before=" + before], 60)
-            v = r.stdout.strip()
-            if r.returncode != 0 or not VER_RE.match(v):
+            # "npm view version --before" ignora a data e devolve o latest; por isso a
+            # carencia escolhe pela data de publicacao de cada versao estavel.
+            r = run([npm, "view", p, "time", "--json"], 60)
+            try:
+                times = json.loads(r.stdout) if r.returncode == 0 else None
+            except ValueError:
+                times = None
+            if not isinstance(times, dict):
                 raise Fail("npm view falhou para " + p)
-            latest[p] = v
+            ok = [v for v, t in times.items() if re.match(r"^\d+\.\d+\.\d+$", v)
+                  and isinstance(t, str) and t[:10] < before]
+            if not ok:
+                raise Fail("sem versao com %d dias para %s" % (MIN_AGE_DAYS, p))
+            latest[p] = max(ok, key=vtuple)
+            pubs[p] = times
             iv = read_version(root / "current/lib/node_modules" / p)
             if iv is None and glob:
                 iv = read_version(Path(glob) / p)
@@ -138,10 +148,16 @@ def main(argv):
         cand.mkdir()
         new = cand
         r = run([npm, "install", "-g", "--prefix", str(new), "--no-audit", "--no-fund",
-                 "--ignore-scripts", "--before=" + before,
-                 "--loglevel=error"] + ["%s@%s" % (p, target[p]) for p in pkgs], 900)
+                 "--ignore-scripts", "--loglevel=error"]
+            + (["--before=" + before] if all(str(pubs[p].get(target[p], "9"))[:10] < before
+                                              for p in pkgs) else []) + ["%s@%s" % (p, target[p]) for p in pkgs], 900)
         if r.returncode != 0:
             raise Fail("npm install rc=%d" % r.returncode)
+        # Sem scripts das dependencias transitivas; so o postinstall dos proprios CLIs
+        # (opencode e claude baixam o binario nativo nele).
+        r = run([npm, "rebuild", "-g", "--prefix", str(new), "--loglevel=error"] + pkgs, 600)
+        if r.returncode != 0:
+            raise Fail("npm rebuild rc=%d" % r.returncode)
         env = dict(os.environ, DISABLE_AUTOUPDATER="1", CI="1")
         for p in pkgs:
             pj = new / "lib/node_modules" / p / "package.json"

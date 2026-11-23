@@ -14,7 +14,15 @@ import json, os, sys
 ctl = json.load(open(os.environ["FAKE_CTL"]))
 a = sys.argv[1:]
 if a[0] == "view":
-    print(ctl["latest"][a[1]]); sys.exit(0)
+    v = ctl["latest"][a[1]]
+    times = {"created": "2020-01-01T00:00:00Z", "0.0.1": "2020-01-01T00:00:00Z",
+             v: ctl.get("published", "2020-01-02T00:00:00Z")}
+    for o in ctl.get("old", []):
+        times[o] = "2020-01-01T00:00:00Z"
+    print(json.dumps(times)); sys.exit(0)
+if a[0] == "rebuild":
+    open(ctl["log"], "a").write("rebuild " + " ".join(a) + "\n")
+    sys.exit(1 if ctl.get("rebuild_fail") else 0)
 if a[0] == "root":
     print(ctl["root"]); sys.exit(0)
 if a[0] == "install":
@@ -180,7 +188,7 @@ def test_no_downgrade(env):
 def test_install_uses_min_age_and_ignore_scripts(env):
     import datetime
     assert run(env).returncode == 0
-    line = env["_log"].read_text().strip().splitlines()[-1]
+    line = [x for x in env["_log"].read_text().splitlines() if x.startswith("install ")][-1]
     assert "--ignore-scripts" in line
     before = [x for x in line.split() if x.startswith("--before=")]
     assert len(before) == 1
@@ -203,3 +211,26 @@ def test_rollback_pinned_blocks_update(env):
     assert r.returncode == 0 and "fixado" in r.stdout
     assert installs(env) == n
     assert os.readlink(root(env) / "current") == first
+
+
+def test_versao_recente_demais_espera_a_carencia(env):
+    set_ctl(env, {"one": "1.1.0", "two": "2.0.0"}, published="2999-01-01T00:00:00Z")
+    r = run(env)
+    assert r.returncode == 0
+    assert "atualizado" in r.stdout
+    assert not env["_log"].exists()
+
+
+def test_rebuild_so_dos_clis_e_falha_mantem_current(env):
+    r = run(env)
+    assert r.returncode == 0
+    log = env["_log"].read_text()
+    assert "--ignore-scripts" in log and "rebuild -g --prefix" in log
+    assert log.rstrip().endswith("@a/one two")
+    cur = os.readlink(root(env) / "current")
+    import time
+    time.sleep(1.1)
+    set_ctl(env, {"one": "1.2.0", "two": "2.0.0"}, rebuild_fail=True)
+    r = run(env)
+    assert r.returncode == 1 and "rebuild" in r.stderr
+    assert os.readlink(root(env) / "current") == cur
