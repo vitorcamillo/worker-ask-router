@@ -35,6 +35,9 @@ FUTURE_RESET = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=7)).isoform
         ),
         ("quota resets at 2026-10-28T03:00:00+03:00", 86400),
         ("Retry-After: 7200", 7200),
+        ("OpenCode Go usage limit reached (monthly, resets in 10h 13m).", 10 * 3600 + 13 * 60),
+        ('{"body":"{\\"message\\":\\"limit reached (weekly, resets in 2d 3h)\\"}"}', 2 * 86400 + 3 * 3600),
+        ("rolling limit, resets in 45m", 45 * 60),
         ("Retry-After: Wed, 28 Oct 2026 00:00:00 GMT", 86400),
         ('{"error":{"retryAfterMs":7200000}}', 7200),
         ('{"reset_at":"2026-10-28T00:00:00Z"}', 86400),
@@ -59,6 +62,8 @@ def test_reset_formats(raw, seconds):
         "reset at 2026-99-99",
         "[" * 10000,
         "secret=synthetic-private",
+        "limit reached, resets in a while",
+        "resets in 0h 0m",
     ],
 )
 def test_invalid_reset_never_invents_date(raw):

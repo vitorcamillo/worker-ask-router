@@ -120,6 +120,14 @@ def parse_reset(raw, now=None):
         raw,
     ):
         add(value)
+    # OpenCode Go: "usage limit reached (monthly, resets in 10h 13m)".
+    for match in re.finditer(
+        r"(?i)resets?\s+in\s+(?:(\d+)\s*d\b)?\s*(?:(\d+)\s*h\b)?\s*(?:(\d+)\s*m\b)?\s*(?:(\d+)\s*s\b)?",
+        raw,
+    ):
+        parts = [int(g) if g else 0 for g in match.groups()]
+        if any(match.groups()):
+            add(parts[0] * 86400 + parts[1] * 3600 + parts[2] * 60 + parts[3], relative=True)
     for value in re.findall(r"(?im)^retry-after:\s*([^\r\n]+)", raw):
         if re.fullmatch(r"\d+(?:\.\d+)?", value.strip()):
             add(value, relative=True)
