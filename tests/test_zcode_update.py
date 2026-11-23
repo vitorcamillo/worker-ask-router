@@ -176,8 +176,11 @@ def test_rollback_pinned_blocks_update_until_force(env):
 
 
 def test_install_failure_restores_previous(tmp_path, monkeypatch):
+    import importlib.machinery
     import importlib.util
-    spec = importlib.util.spec_from_file_location("zcode_update", SCRIPT)
+    spec = importlib.util.spec_from_file_location(
+        "zcode_update", str(SCRIPT),
+        loader=importlib.machinery.SourceFileLoader("zcode_update", str(SCRIPT)))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     cli = tmp_path / "glm"
