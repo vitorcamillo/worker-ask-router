@@ -575,6 +575,22 @@ class BridgeTest(unittest.TestCase):
         )
         self.assertEqual(st, 200)
         obj = json.loads(data)
+        # Start Plan indisponível: cai no roteador completo (degrau zcode-pago).
+        self.assertEqual(obj["rc"], 0)
+        self.assertIn("POINT=1,2", obj["stdout"])
+        self.assertIn('"task_id": "fast75"', obj["stdout"])
+        self.assertNotIn("fast", obj)
+
+    def test_fast_75_e_roteador_75(self):
+        _, port = self._start(self.fake_75, zcode_worker=self.fake_zcode_75)
+        st, data = self._post(
+            port,
+            {"task_id": "fast7575", "spec": "oi", "question": "q", "fast": True},
+            token=self.token,
+            timeout=30,
+        )
+        self.assertEqual(st, 200)
+        obj = json.loads(data)
         self.assertEqual(obj["rc"], 75)
         self.assertEqual(obj["stdout"], "")
 

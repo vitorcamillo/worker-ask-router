@@ -476,11 +476,21 @@ def build_server(config: Config, token: str) -> ThreadingHTTPServer:
                 finish(503, {"error": "busy"}, task=task_id)
                 return
             usage = None
+            fast_used = fast is True
             try:
                 if fast is True:
                     rc, out, usage = _run_fast(
                         config, task_id, question, img_bytes, ext, timeout_s
                     )
+                    if rc == 75:
+                        # Start Plan indisponível: cai no roteador completo, cujo
+                        # último degrau (zcode-pago) é o único que libera o pago.
+                        fast_used = False
+                        usage = None
+                        restante = max(1, timeout_s - int(time.monotonic() - start))
+                        rc, out = _run_worker(
+                            config, task_id, spec, img_bytes, ext, restante, providers
+                        )
                 else:
                     rc, out = _run_worker(
                         config, task_id, spec, img_bytes, ext, timeout_s, providers
@@ -497,7 +507,7 @@ def build_server(config: Config, token: str) -> ThreadingHTTPServer:
             except Exception:
                 text = ""
             resp = {"rc": rc, "stdout": text, "elapsed_ms": ms}
-            if fast is True:
+            if fast_used:
                 resp["fast"] = True
                 if usage:
                     resp["usage"] = usage
