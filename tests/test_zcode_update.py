@@ -159,3 +159,48 @@ def test_check_no_change(env):
 def test_disabled_no_network(env):
     r = env.run(WORKER_AUTO_UPDATE="0", ZCODE_UPDATE_MANIFEST_URL="http://127.0.0.1:1/x")
     assert r.returncode == 0 and "desativado" in r.stdout and intact(env)
+
+
+def test_rollback_pinned_blocks_update_until_force(env):
+    assert env.run().returncode == 0
+    assert env.run("--rollback").returncode == 0
+    assert (env.cli / ".rollback-pin").exists()
+    r = env.run()
+    assert r.returncode == 0 and "fixado" in r.stdout
+    assert (env.cli / "VERSION").read_text() == "3.18.2\n"
+    assert (env.cli / "zcode.cjs").read_text() == "// old\n"
+    r = env.run("--force")
+    assert r.returncode == 0, r.stderr
+    assert (env.cli / "VERSION").read_text() == "4.0.0\n"
+    assert not (env.cli / ".rollback-pin").exists()
+
+
+def test_install_failure_restores_previous(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("zcode_update", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cli = tmp_path / "glm"
+    (cli / "provider").mkdir(parents=True)
+    (cli / "zcode.cjs").write_text("// old\n")
+    (cli / "provider/zcode-builtin.json").write_text('{"old": true}')
+    (cli / "VERSION").write_text("3.18.2\n")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "zcode.cjs").write_text("// new\n")
+    (staging / "zcode-builtin.json").write_text('{"new": true}')
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError("falha simulada")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(OSError):
+        mod.install(str(cli), str(staging), "4.0.0")
+    assert (cli / "zcode.cjs").read_text() == "// old\n"
+    assert (cli / "provider/zcode-builtin.json").read_text() == '{"old": true}'
+    assert (cli / "VERSION").read_text() == "3.18.2\n"

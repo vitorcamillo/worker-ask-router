@@ -138,6 +138,13 @@ def smoke(staging):
         raise Fail("json invalido")
 
 
+PIN_NAME = ".rollback-pin"
+
+
+def pin_path(cli_dir):
+    return os.path.join(cli_dir, PIN_NAME)
+
+
 def copy_prev(path):
     if os.path.exists(path):
         shutil.copy2(path, path + ".prev")
@@ -153,12 +160,24 @@ def install(cli_dir, staging, version):
         copy_prev(p)
     os.chmod(os.path.join(staging, "zcode.cjs"), 0o755)
     os.chmod(os.path.join(staging, "zcode-builtin.json"), 0o644)
-    os.replace(os.path.join(staging, "zcode.cjs"), js)
-    os.replace(os.path.join(staging, "zcode-builtin.json"), pj)
     tmp = ver + ".tmp"
-    with open(tmp, "w") as f:
-        f.write(version + "\n")
-    os.replace(tmp, ver)
+    try:
+        os.replace(os.path.join(staging, "zcode.cjs"), js)
+        os.replace(os.path.join(staging, "zcode-builtin.json"), pj)
+        with open(tmp, "w") as f:
+            f.write(version + "\n")
+        os.replace(tmp, ver)
+    except Exception:
+        for p in (js, pj, ver):
+            if os.path.exists(p + ".prev"):
+                shutil.copy2(p + ".prev", p)
+            elif os.path.exists(p):
+                os.unlink(p)
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    if os.path.exists(pin_path(cli_dir)):
+        os.unlink(pin_path(cli_dir))
 
 
 def rollback(cli_dir):
@@ -168,7 +187,10 @@ def rollback(cli_dir):
         return 1
     for p in pairs:
         os.replace(p + ".prev", p)
-    print("zcode-update: rollback para " + read_local(cli_dir))
+    with open(pin_path(cli_dir), "w") as f:
+        f.write(read_local(cli_dir) + "\n")
+    print("zcode-update: rollback para " + read_local(cli_dir)
+          + " (fixado; use --force ou remova " + PIN_NAME + " para retomar updates)")
     return 0
 
 
@@ -184,6 +206,9 @@ def run(args, cli_dir):
     local = read_local(cli_dir)
     if args.check:
         print(f"zcode-update: local {local}, remota {remote}")
+        return 0
+    if os.path.exists(pin_path(cli_dir)) and not args.force:
+        print(f"zcode-update: rollback fixado em {local}; use --force para retomar updates")
         return 0
     if vtuple(remote) < vtuple(local) or (vtuple(remote) == vtuple(local) and not args.force):
         print(f"zcode-update: atualizado ({local})")

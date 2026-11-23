@@ -28,12 +28,20 @@ export ZCODE_CREDENTIAL_SECRET_FILE="$SECRET_FILE"
 # claude) no volume. Cada script troca os arquivos atomicamente e, se falhar, deixa a
 # versao atual intacta. WORKER_AUTO_UPDATE=0 desliga.
 if [ "${WORKER_AUTO_UPDATE:-1}" != "0" ]; then
+    update_delay="${WORKER_UPDATE_DELAY:-60}"
+    case "$update_delay" in
+        ''|*[!0-9]*) echo "entrypoint: WORKER_UPDATE_DELAY invalido ($update_delay); usando 60" >&2; update_delay=60 ;;
+    esac
+    update_interval="${WORKER_UPDATE_INTERVAL:-86400}"
+    case "$update_interval" in
+        ''|*[!0-9]*) echo "entrypoint: WORKER_UPDATE_INTERVAL invalido ($update_interval); usando 86400" >&2; update_interval=86400 ;;
+    esac
     (
-        sleep "${WORKER_UPDATE_DELAY:-60}"
+        sleep "$update_delay"
         while :; do
             timeout 1800 /opt/worker-ask/bin/zcode-update || true
             timeout 1800 /opt/worker-ask/bin/cli-update || true
-            sleep "${WORKER_UPDATE_INTERVAL:-86400}"
+            sleep "$update_interval"
         done
     ) </dev/null &
 fi

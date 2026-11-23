@@ -18,7 +18,7 @@ if a[0] == "view":
 if a[0] == "root":
     print(ctl["root"]); sys.exit(0)
 if a[0] == "install":
-    open(ctl["log"], "a").write("install\n")
+    open(ctl["log"], "a").write("install " + " ".join(a) + "\n")
     if ctl.get("install_fail"):
         sys.exit(1)
     d = a[a.index("--prefix") + 1]
@@ -175,3 +175,31 @@ def test_no_downgrade(env):
     r = run(env)
     assert r.returncode == 0 and "atualizado" in r.stdout
     assert installs(env) == 0
+
+
+def test_install_uses_min_age_and_ignore_scripts(env):
+    import datetime
+    assert run(env).returncode == 0
+    line = env["_log"].read_text().strip().splitlines()[-1]
+    assert "--ignore-scripts" in line
+    before = [x for x in line.split() if x.startswith("--before=")]
+    assert len(before) == 1
+    day = datetime.date.fromisoformat(before[0].split("=", 1)[1])
+    age = (datetime.date.today() - day).days
+    assert 6 <= age <= 8
+
+
+def test_rollback_pinned_blocks_update(env):
+    import time
+    assert run(env).returncode == 0
+    first = os.readlink(root(env) / "current")
+    time.sleep(1.1)
+    set_ctl(env, {"one": "1.2.0", "two": "2.0.0"})
+    assert run(env).returncode == 0
+    assert run(env, "--rollback").returncode == 0
+    assert (root(env) / "pinned").exists()
+    n = installs(env)
+    r = run(env)
+    assert r.returncode == 0 and "fixado" in r.stdout
+    assert installs(env) == n
+    assert os.readlink(root(env) / "current") == first

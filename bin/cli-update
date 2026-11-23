@@ -7,12 +7,14 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 NAME_RE = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
 VER_RE = re.compile(r"^\d+\.\d+\.\d+([-+].*)?$")
 DEFAULT_PKGS = "@opencode/cli,@openai/codex,@anthropic-ai/claude-code"
+MIN_AGE_DAYS = 7
+PIN_NAME = "pinned"
 
 
 class Fail(Exception):
@@ -86,8 +88,16 @@ def main(argv):
             set_link(cur, pt)
             if ct:
                 set_link(prev, ct)
-            print("cli-update: rollback para %s" % pt)
+            (root / PIN_NAME).write_text((pt or "") + "\n")
+            print("cli-update: rollback para %s (fixado; remova %s para retomar updates)"
+                  % (pt, root / PIN_NAME))
             return 0
+        pin = root / PIN_NAME
+        if pin.exists():
+            print("cli-update: rollback fixado em %s; remova %s para retomar updates"
+                  % (pin.read_text().strip(), pin))
+            return 0
+        before = (datetime.now(timezone.utc) - timedelta(days=MIN_AGE_DAYS)).date().isoformat()
         for p in pkgs:
             if not NAME_RE.match(p):
                 raise Fail("nome de pacote invalido")
@@ -97,7 +107,7 @@ def main(argv):
             glob = r.stdout.strip() if r.returncode == 0 else ""
         installed, latest = {}, {}
         for p in pkgs:
-            r = run([npm, "view", p, "version"], 60)
+            r = run([npm, "view", p, "version", "--before=" + before], 60)
             v = r.stdout.strip()
             if r.returncode != 0 or not VER_RE.match(v):
                 raise Fail("npm view falhou para " + p)
@@ -128,6 +138,7 @@ def main(argv):
         cand.mkdir()
         new = cand
         r = run([npm, "install", "-g", "--prefix", str(new), "--no-audit", "--no-fund",
+                 "--ignore-scripts", "--before=" + before,
                  "--loglevel=error"] + ["%s@%s" % (p, target[p]) for p in pkgs], 900)
         if r.returncode != 0:
             raise Fail("npm install rc=%d" % r.returncode)
