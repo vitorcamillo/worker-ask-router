@@ -71,6 +71,59 @@ echo "$@"
 exit 0
 """
 
+FAKE_FAIL = """#!/bin/sh
+echo "should not be called" >&2
+exit 99
+"""
+
+FAKE_ZCODE_FAST = """#!/usr/bin/env python3
+import sys, os, json
+args = sys.argv[1:]
+def get(flag):
+    if flag in args:
+        i = args.index(flag)
+        if i + 1 < len(args):
+            return args[i + 1]
+    return None
+assert "--chat" in args, "missing --chat"
+assert get("--mode") == "plan", get("--mode")
+assert get("--model") == "glm-5.3-flash", get("--model")
+assert get("--effort") == "low", get("--effort")
+assert "--json" in args, "missing --json"
+spec = get("--spec")
+assert spec is not None and os.path.isfile(spec), spec
+assert open(spec, encoding="utf-8").read().strip() != "", "empty spec"
+has_attach = "--attach" in args
+attach = get("--attach") if has_attach else None
+expect = os.environ.get("EXPECT_ATTACH")
+if expect == "1":
+    assert has_attach, "expected --attach"
+    assert attach is not None and os.path.isfile(attach), attach
+elif expect == "0":
+    assert not has_attach, "unexpected --attach"
+print(json.dumps({"status": "ok", "response": " a red circle \\n", "usage": {"inputTokens": 900, "outputTokens": 5}}))
+sys.exit(0)
+"""
+
+FAKE_ZCODE_75 = """#!/bin/sh
+exit 75
+"""
+
+FAKE_ZCODE_BADJSON = """#!/bin/sh
+echo "not json at all"
+exit 0
+"""
+
+FAKE_ZCODE_BADSTATUS = """#!/bin/sh
+echo '{"status":"error","response":"x"}'
+exit 0
+"""
+
+FAKE_ZCODE_ENV = """#!/bin/sh
+echo "{\\"status\\":\\"ok\\",\\"response\\":\\"paid=$ZCODE_WORKER_ALLOW_PAID tok=${WORKER_ASK_VISION_TOKEN:-none}\\"}"
+exit 0
+"""
+
 
 def _write_exe(path, content):
     with open(path, "w", encoding="utf-8") as f:
@@ -93,11 +146,23 @@ class BridgeTest(unittest.TestCase):
         cls.fake_slow = os.path.join(d, "fake-slow.sh")
         cls.fake_sleep30 = os.path.join(d, "fake-sleep30.sh")
         cls.fake_argv = os.path.join(d, "fake-argv.sh")
+        cls.fake_fail = os.path.join(d, "fake-fail.sh")
+        cls.fake_zcode_fast = os.path.join(d, "fake-zcode-fast.py")
+        cls.fake_zcode_75 = os.path.join(d, "fake-zcode-75.sh")
+        cls.fake_zcode_badjson = os.path.join(d, "fake-zcode-badjson.sh")
+        cls.fake_zcode_badstatus = os.path.join(d, "fake-zcode-badstatus.sh")
+        cls.fake_zcode_env = os.path.join(d, "fake-zcode-env.sh")
         _write_exe(cls.fake_ok, FAKE_OK)
         _write_exe(cls.fake_75, FAKE_75)
         _write_exe(cls.fake_slow, FAKE_SLOW)
         _write_exe(cls.fake_sleep30, FAKE_SLEEP30)
         _write_exe(cls.fake_argv, FAKE_ARGV)
+        _write_exe(cls.fake_fail, FAKE_FAIL)
+        _write_exe(cls.fake_zcode_fast, FAKE_ZCODE_FAST)
+        _write_exe(cls.fake_zcode_75, FAKE_ZCODE_75)
+        _write_exe(cls.fake_zcode_badjson, FAKE_ZCODE_BADJSON)
+        _write_exe(cls.fake_zcode_badstatus, FAKE_ZCODE_BADSTATUS)
+        _write_exe(cls.fake_zcode_env, FAKE_ZCODE_ENV)
 
     @classmethod
     def tearDownClass(cls):
@@ -313,6 +378,210 @@ class BridgeTest(unittest.TestCase):
         )
         self.assertEqual(st, 200)
         self.assertEqual(json.loads(data)["rc"], 75)
+
+    def test_fast_happy_with_image(self):
+        old = os.environ.get("EXPECT_ATTACH")
+        os.environ["EXPECT_ATTACH"] = "1"
+        try:
+            _, port = self._start(self.fake_fail, zcode_worker=self.fake_zcode_fast)
+            img = base64.b64encode(b"fakepng").decode()
+            st, data = self._post(
+                port,
+                {
+                    "task_id": "fast1",
+                    "spec": "oi",
+                    "question": "describe this image",
+                    "fast": True,
+                    "image_b64": img,
+                    "image_ext": ".png",
+                    "timeout_seconds": 20,
+                },
+                token=self.token,
+            )
+        finally:
+            if old is None:
+                os.environ.pop("EXPECT_ATTACH", None)
+            else:
+                os.environ["EXPECT_ATTACH"] = old
+        self.assertEqual(st, 200)
+        obj = json.loads(data)
+        self.assertEqual(obj["rc"], 0)
+        self.assertTrue(obj["fast"])
+        self.assertEqual(obj["usage"], {"input": 900, "output": 5})
+        lines = obj["stdout"].split("\n")
+        start = lines.index("```json")
+        end = lines.index("```", start + 1)
+        inner = "\n".join(lines[start + 1 : end])
+        inner_obj = json.loads(inner)
+        self.assertEqual(inner_obj["task_id"], "fast1")
+        self.assertEqual(inner_obj["schema_version"], 1)
+        self.assertEqual(inner_obj["answer"], "a red circle")
+        self.assertTrue(inner_obj["image_seen"])
+        self.assertTrue(inner_obj["fast"])
+
+    def test_fast_without_image(self):
+        old = os.environ.get("EXPECT_ATTACH")
+        os.environ["EXPECT_ATTACH"] = "0"
+        try:
+            _, port = self._start(self.fake_fail, zcode_worker=self.fake_zcode_fast)
+            st, data = self._post(
+                port,
+                {
+                    "task_id": "fast2",
+                    "spec": "oi",
+                    "question": "describe this image",
+                    "fast": True,
+                },
+                token=self.token,
+            )
+        finally:
+            if old is None:
+                os.environ.pop("EXPECT_ATTACH", None)
+            else:
+                os.environ["EXPECT_ATTACH"] = old
+        self.assertEqual(st, 200)
+        obj = json.loads(data)
+        self.assertEqual(obj["rc"], 0)
+        self.assertTrue(obj["fast"])
+        lines = obj["stdout"].split("\n")
+        start = lines.index("```json")
+        end = lines.index("```", start + 1)
+        inner = "\n".join(lines[start + 1 : end])
+        inner_obj = json.loads(inner)
+        self.assertFalse(inner_obj["image_seen"])
+
+    def test_fast_does_not_call_router(self):
+        old = os.environ.get("EXPECT_ATTACH")
+        os.environ["EXPECT_ATTACH"] = "0"
+        try:
+            _, port = self._start(self.fake_fail, zcode_worker=self.fake_zcode_fast)
+            st, data = self._post(
+                port,
+                {"task_id": "fast3", "spec": "oi", "question": "q", "fast": True},
+                token=self.token,
+            )
+        finally:
+            if old is None:
+                os.environ.pop("EXPECT_ATTACH", None)
+            else:
+                os.environ["EXPECT_ATTACH"] = old
+        self.assertEqual(st, 200)
+        self.assertEqual(json.loads(data)["rc"], 0)
+
+    def test_no_fast_does_not_call_zcode(self):
+        _, port = self._start(self.fake_ok, zcode_worker=self.fake_fail)
+        st, data = self._post(
+            port, {"task_id": "nofast1", "spec": "oi"}, token=self.token
+        )
+        self.assertEqual(st, 200)
+        self.assertEqual(json.loads(data)["rc"], 0)
+
+    def test_fast_child_env(self):
+        old_token = os.environ.get("WORKER_ASK_VISION_TOKEN")
+        old_paid = os.environ.get("ZCODE_WORKER_ALLOW_PAID")
+        try:
+            os.environ["WORKER_ASK_VISION_TOKEN"] = "D" * 40
+            _, port = self._start(self.fake_fail, zcode_worker=self.fake_zcode_env)
+            st, data = self._post(
+                port,
+                {
+                    "task_id": "fastenv",
+                    "spec": "oi",
+                    "question": "q",
+                    "fast": True,
+                },
+                token=self.token,
+            )
+        finally:
+            if old_token is None:
+                os.environ.pop("WORKER_ASK_VISION_TOKEN", None)
+            else:
+                os.environ["WORKER_ASK_VISION_TOKEN"] = old_token
+            if old_paid is None:
+                os.environ.pop("ZCODE_WORKER_ALLOW_PAID", None)
+            else:
+                os.environ["ZCODE_WORKER_ALLOW_PAID"] = old_paid
+        self.assertEqual(st, 200)
+        out = json.loads(data)["stdout"]
+        self.assertEqual(json.loads(data)["rc"], 0)
+        self.assertIn("paid=1", out)
+        self.assertIn("tok=none", out)
+        self.assertNotIn("D" * 40, out)
+
+    def test_fast_zcode_exit_75(self):
+        _, port = self._start(self.fake_ok, zcode_worker=self.fake_zcode_75)
+        st, data = self._post(
+            port,
+            {"task_id": "fast75", "spec": "oi", "question": "q", "fast": True},
+            token=self.token,
+            timeout=30,
+        )
+        self.assertEqual(st, 200)
+        obj = json.loads(data)
+        self.assertEqual(obj["rc"], 75)
+        self.assertEqual(obj["stdout"], "")
+
+    def test_fast_rc0_nonjson(self):
+        _, port = self._start(self.fake_ok, zcode_worker=self.fake_zcode_badjson)
+        st, data = self._post(
+            port,
+            {"task_id": "fastnj", "spec": "oi", "question": "q", "fast": True},
+            token=self.token,
+        )
+        self.assertEqual(st, 200)
+        self.assertEqual(json.loads(data)["rc"], 1)
+
+    def test_fast_rc0_badstatus(self):
+        _, port = self._start(self.fake_ok, zcode_worker=self.fake_zcode_badstatus)
+        st, data = self._post(
+            port,
+            {"task_id": "fastbs", "spec": "oi", "question": "q", "fast": True},
+            token=self.token,
+        )
+        self.assertEqual(st, 200)
+        self.assertEqual(json.loads(data)["rc"], 1)
+
+    def test_bad_fast_400(self):
+        _, port = self._start(self.fake_ok)
+        for body in (
+            {"task_id": "bf1", "spec": "oi", "fast": "yes"},
+            {"task_id": "bf2", "spec": "oi", "fast": True, "providers": ["opencode"]},
+        ):
+            with self.subTest(body=body):
+                st, data = self._post(port, body, token=self.token)
+                self.assertEqual(st, 400)
+                self.assertEqual(json.loads(data), {"error": "bad fast"})
+
+    def test_bad_question_400(self):
+        _, port = self._start(self.fake_ok)
+        cases = [
+            {"task_id": "bq1", "spec": "oi", "fast": True},
+            {"task_id": "bq2", "spec": "oi", "fast": True, "question": "  "},
+            {"task_id": "bq3", "spec": "oi", "fast": True, "question": "x" * 4001},
+        ]
+        for body in cases:
+            with self.subTest(body=body):
+                st, data = self._post(port, body, token=self.token)
+                self.assertEqual(st, 400)
+                self.assertEqual(json.loads(data), {"error": "bad question"})
+
+    def test_fast_false_uses_router(self):
+        _, port = self._start(self.fake_ok)
+        img = base64.b64encode(b"fakepng").decode()
+        st, data = self._post(
+            port,
+            {
+                "task_id": "fastfalse",
+                "spec": "descreva o ponto",
+                "image_b64": img,
+                "image_ext": ".png",
+                "fast": False,
+                "timeout_seconds": 20,
+            },
+            token=self.token,
+        )
+        self.assertEqual(st, 200)
+        self.assertNotIn("fast", json.loads(data))
 
     def test_concurrency_503(self):
         _, port = self._start(self.fake_slow, max_concurrency=1)

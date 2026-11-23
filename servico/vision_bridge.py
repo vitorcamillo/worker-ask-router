@@ -11,7 +11,7 @@ Feito para rodar em container (Coolify), com /home/worker em volume. Env:
 WAV_BIND, WAV_ALLOW_ANY_BIND, WAV_PORT, WAV_TOKEN_FILE,
 WORKER_ASK_VISION_TOKEN (token via env; minimo 32 caracteres),
 WAV_ALLOWED_HOSTS (virgulas), WAV_MAX_CONCURRENCY, WAV_MAX_BODY,
-WAV_WORKER_ASK, WAV_ORCHESTRATOR, WAV_NO_MUSE ("0" desliga),
+WAV_WORKER_ASK, WAV_ZCODE_WORKER, WAV_ORCHESTRATOR, WAV_NO_MUSE ("0" desliga),
 WAV_MAX_TIMEOUT, WAV_LOGIN_CHECKS (JSON nome->argv), WAV_LOGIN_CHECK_TTL.
 """
 
@@ -100,6 +100,7 @@ class Config:
     max_concurrency: int = 2
     max_body: int = 6 * 1024 * 1024
     worker_ask: str = "worker-ask"
+    zcode_worker: str = "zcode-worker"
     orchestrator: str = "claude"
     no_muse: bool = True
     max_timeout: int = 120
@@ -152,6 +153,7 @@ class Config:
         max_conc = _int("WAV_MAX_CONCURRENCY", 2)
         max_body = _int("WAV_MAX_BODY", 6 * 1024 * 1024)
         worker_ask = os.getenv("WAV_WORKER_ASK", "worker-ask")
+        zcode_worker = os.getenv("WAV_ZCODE_WORKER", "zcode-worker")
         orch = os.getenv("WAV_ORCHESTRATOR", "claude")
         raw_no_muse = os.getenv("WAV_NO_MUSE")
         if raw_no_muse is None:
@@ -171,6 +173,7 @@ class Config:
             max_concurrency=max_conc,
             max_body=max_body,
             worker_ask=worker_ask,
+            zcode_worker=zcode_worker,
             orchestrator=orch,
             no_muse=no_muse,
             max_timeout=max_timeout,
@@ -452,11 +455,36 @@ def build_server(config: Config, token: str) -> ThreadingHTTPServer:
                 finish(400, {"error": "bad providers"}, task=task_id)
                 return
 
+            fast = obj.get("fast")
+            if fast is not None and not isinstance(fast, bool):
+                finish(400, {"error": "bad fast"}, task=task_id)
+                return
+            question = obj.get("question")
+            if fast is True:
+                if not (providers is None or providers == ["zcode"]):
+                    finish(400, {"error": "bad fast"}, task=task_id)
+                    return
+                if (
+                    not isinstance(question, str)
+                    or not question.strip()
+                    or len(question) > 4000
+                ):
+                    finish(400, {"error": "bad question"}, task=task_id)
+                    return
+
             if not sem.acquire(timeout=2):
                 finish(503, {"error": "busy"}, task=task_id)
                 return
+            usage = None
             try:
-                rc, out = _run_worker(config, task_id, spec, img_bytes, ext, timeout_s, providers)
+                if fast is True:
+                    rc, out, usage = _run_fast(
+                        config, task_id, question, img_bytes, ext, timeout_s
+                    )
+                else:
+                    rc, out = _run_worker(
+                        config, task_id, spec, img_bytes, ext, timeout_s, providers
+                    )
             finally:
                 try:
                     sem.release()
@@ -468,7 +496,12 @@ def build_server(config: Config, token: str) -> ThreadingHTTPServer:
                 text = tail.decode("utf-8", errors="replace")
             except Exception:
                 text = ""
-            self._send_json(200, {"rc": rc, "stdout": text, "elapsed_ms": ms})
+            resp = {"rc": rc, "stdout": text, "elapsed_ms": ms}
+            if fast is True:
+                resp["fast"] = True
+                if usage:
+                    resp["usage"] = usage
+            self._send_json(200, resp)
             self._log(task_id, rc, ms, 200)
 
     server = ThreadingHTTPServer((config.bind, config.port), Handler)
@@ -550,6 +583,134 @@ def _run_worker(config: Config, task_id: str, spec: str, img_bytes, ext: str, ti
             except Exception:
                 pass
             return 124, b""
+
+
+def _run_fast(config: Config, task_id: str, question: str, img_bytes, ext: str, timeout_s: int):
+    with tempfile.TemporaryDirectory(prefix="wav-") as tmpd:
+        try:
+            os.chmod(tmpd, 0o700)
+        except OSError:
+            pass
+        indir = os.path.join(tmpd, "in")
+        os.mkdir(indir)
+        img_path = None
+        if img_bytes is not None:
+            img_path = os.path.join(indir, "image" + ext)
+            with open(img_path, "wb") as f:
+                f.write(img_bytes)
+        qpath = os.path.join(tmpd, "question.md")
+        with open(qpath, "w", encoding="utf-8") as f:
+            f.write(question)
+        cmd = [
+            config.zcode_worker,
+            "--chat",
+            "--mode",
+            "plan",
+            "--model",
+            "glm-5.3-flash",
+            "--effort",
+            "low",
+            "--cwd",
+            indir,
+            "--queue-timeout",
+            "10",
+            "--json",
+            "--spec",
+            qpath,
+        ]
+        if img_path is not None:
+            cmd.extend(["--attach", os.path.abspath(img_path)])
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k != "WORKER_ASK_VISION_TOKEN" and not k.startswith("WAV_")
+        }
+        env["ZCODE_WORKER_ALLOW_PAID"] = "1"
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+                env=env,
+            )
+        except FileNotFoundError:
+            return 127, b"", None
+        except OSError:
+            return 127, b"", None
+        try:
+            out, _ = proc.communicate(timeout=timeout_s + 15)
+        except subprocess.TimeoutExpired:
+            try:
+                import signal as _sig
+
+                os.killpg(proc.pid, _sig.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, _sig.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    pass
+            try:
+                proc.communicate(timeout=2)
+            except Exception:
+                pass
+            return 124, b"", None
+        if proc.returncode != 0:
+            return proc.returncode, b"", None
+        raw_out = out or b""
+        lines = [ln for ln in raw_out.splitlines() if ln.strip()]
+        if not lines:
+            return 1, b"", None
+        try:
+            obj = json.loads(lines[-1].decode("utf-8", errors="strict"))
+        except Exception:
+            try:
+                obj = json.loads(lines[-1])
+            except Exception:
+                return 1, b"", None
+        if not isinstance(obj, dict):
+            return 1, b"", None
+        if obj.get("status") != "ok":
+            return 1, b"", None
+        response = obj.get("response")
+        if not isinstance(response, str):
+            return 1, b"", None
+        answer = response.strip()
+        contrato = {
+            "schema_version": 1,
+            "task_id": task_id,
+            "execution_state": "completed",
+            "changed_files": [],
+            "validation_owner": "orchestrator",
+            "approval": "pending",
+            "answer": answer,
+            "image_seen": img_bytes is not None,
+            "fast": True,
+        }
+        texto = "```json\n" + json.dumps(contrato, ensure_ascii=False) + "\n```\n"
+        usage = obj.get("usage")
+        usage_out = None
+        if isinstance(usage, dict):
+            u = {}
+            if isinstance(usage.get("inputTokens"), int) and not isinstance(
+                usage.get("inputTokens"), bool
+            ):
+                u["input"] = usage.get("inputTokens")
+            if isinstance(usage.get("outputTokens"), int) and not isinstance(
+                usage.get("outputTokens"), bool
+            ):
+                u["output"] = usage.get("outputTokens")
+            usage_out = u
+        return 0, texto.encode("utf-8"), usage_out
 
 
 def main(argv=None) -> int:
