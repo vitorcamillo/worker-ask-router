@@ -2,10 +2,12 @@
 
 import base64
 import http.client
+import importlib.machinery
 import importlib.util
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -504,9 +506,64 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(st, 200)
         out = json.loads(data)["stdout"]
         self.assertEqual(json.loads(data)["rc"], 0)
-        self.assertIn("paid=1", out)
+        # Pago desligado na ponte: sem ZCODE_WORKER_ALLOW_PAID o worker devolve 75
+        # se o Start Plan falhar (só o degrau zcode-pago define a variável).
+        self.assertIn("paid=", out)
+        self.assertNotIn("paid=1", out)
         self.assertIn("tok=none", out)
         self.assertNotIn("D" * 40, out)
+
+    def test_fast_argv_aceito_pelo_parser_real(self):
+        # Integração com o parser real: o argv de _run_fast precisa ser aceito
+        # pelo bin/zcode-worker (core) e pela cápsula (features), sem rc 2.
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo = os.path.dirname(here)
+        worker = os.path.join(repo, "bin", "zcode-worker")
+        self.assertTrue(os.path.isfile(worker), worker)
+        with tempfile.TemporaryDirectory() as td:
+            spec = os.path.join(td, "question.md")
+            with open(spec, "w", encoding="utf-8") as f:
+                f.write("describe")
+            img = os.path.join(td, "image.png")
+            with open(img, "wb") as f:
+                f.write(b"fakepng")
+            argv = [
+                "--chat", "--mode", "plan", "--model", "glm-5.3-flash",
+                "--effort", "low", "--cwd", td, "--queue-timeout", "10",
+                "--timeout", "20", "--json", "--spec", spec,
+                "--attach", img,
+            ]
+            # Core (bin/zcode-worker): _parse_args com allow_abbrev=False.
+            loader = importlib.machinery.SourceFileLoader(
+                "zcode_worker_core_test", worker
+            )
+            spec_core = importlib.util.spec_from_loader(loader.name, loader)
+            core = importlib.util.module_from_spec(spec_core)
+            loader.exec_module(core)
+            parsed_core = core._parse_args(argv)
+            self.assertTrue(parsed_core.chat)
+            self.assertTrue(parsed_core.json)
+            self.assertEqual(parsed_core.attach, [img])
+            self.assertEqual(parsed_core.timeout, 20.0)
+            # Cápsula (features): mesmo argv precisa parsear e validar anexos.
+            src = os.path.join(repo, "adapters", "zcode", "src")
+            if src not in sys.path:
+                sys.path.insert(0, src)
+            from zcode_worker import features as _feat
+
+            parsed_feat = _feat.parse_args(argv)
+            self.assertTrue(parsed_feat.chat)
+            self.assertTrue(parsed_feat.json)
+            # Help do executável real (via integração) declara as flags.
+            env = dict(os.environ)
+            env["ASK_PRESENTATION_ACTIVE"] = "1"
+            r = subprocess.run(
+                [sys.executable, worker, "--help"],
+                capture_output=True, text=True, env=env, timeout=60,
+            )
+            self.assertEqual(r.returncode, 0, r.stderr[-400:])
+            for flag in ("--chat", "--json", "--attach", "--timeout"):
+                self.assertIn(flag, r.stdout)
 
     def test_fast_zcode_exit_75(self):
         _, port = self._start(self.fake_ok, zcode_worker=self.fake_zcode_75)

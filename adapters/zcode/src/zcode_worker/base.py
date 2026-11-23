@@ -531,14 +531,17 @@ def _headless_tools():
     return list(dict.fromkeys(names))
 
 
-def _run_once(task, cwd, mode, model, effort, deadline):
+def _run_once(task, cwd, mode, model, effort, deadline, chat=False, attachments=None):
     temp_path = _temp_provider(model, effort)
     try:
         env = dict(os.environ)
         env["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] = temp_path
         env["ZCODE_DATA_BASE_DIR"] = AUTH_BASE
-        command = [CLI, "-p", PREAMBULO + task, "--cwd", cwd, "--mode", mode,
+        prompt = task if chat else PREAMBULO + task
+        command = [CLI, "-p", prompt, "--cwd", cwd, "--mode", mode,
                    "--json", "--no-color"]
+        for attachment in attachments or []:
+            command.extend(["--attach", attachment])
         if mode == "edit":
             command.extend(["--disallowed-tools", *_headless_tools()])
         return _run_cli(command, env, deadline)
@@ -547,11 +550,11 @@ def _run_once(task, cwd, mode, model, effort, deadline):
             os.unlink(temp_path)
 
 
-def _execute(task, cwd, mode, model, effort, deadline):
+def _execute(task, cwd, mode, model, effort, deadline, chat=False, attachments=None):
     for attempt in range(len(RETRY_DELAYS) + 1):
         if time.monotonic() >= deadline:
             raise DeadlineExpired("timeout total esgotado")
-        returncode, stdout, stderr = _run_once(task, cwd, mode, model, effort, deadline)
+        returncode, stdout, stderr = _run_once(task, cwd, mode, model, effort, deadline, chat=chat, attachments=attachments)
         if returncode == 124:
             raise DeadlineExpired("timeout do zcode-cli")
         if returncode == 0:
@@ -601,6 +604,9 @@ def _parse_args(argv):
     parser.add_argument("--effort", choices=EFFORTS, default="high")
     parser.add_argument("--saida")
     parser.add_argument("--list-models", action="store_true")
+    parser.add_argument("--chat", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--attach", action="append", default=[])
     return parser.parse_args(argv)
 
 
@@ -691,6 +697,12 @@ def _prepare_background(argv):
     task = _read_task(args)
     common = ["--cwd", args.cwd, "--mode", args.mode, "--timeout", str(args.timeout),
               "--model", args.model, "--effort", args.effort]
+    if getattr(args, "chat", False):
+        common.append("--chat")
+    if getattr(args, "json", False):
+        common.append("--json")
+    for _att in getattr(args, "attach", []) or []:
+        common.extend(["--attach", _att])
     if args.queue_timeout is not None:
         common.extend(["--queue-timeout", str(args.queue_timeout)])
     if len(task.encode("utf-8")) <= TASK_ARGUMENT_MAX_BYTES:
@@ -732,6 +744,8 @@ def _run(argv):
         return 0
     if not args.cwd or not os.path.isdir(args.cwd):
         raise WorkerError("cwd inválido")
+    if getattr(args, "chat", False) and args.mode != "plan":
+        raise WorkerError("--chat exige --mode plan")
     if _is_production_state():
         guarda_drift()
     task = _read_task(args)
@@ -739,8 +753,16 @@ def _run(argv):
     queue_deadline = time.monotonic() + queue_timeout
     with global_slot(queue_deadline):
         deadline = time.monotonic() + args.timeout
-        payload = _execute(task, args.cwd, args.mode, args.model, args.effort, deadline)
+        payload = _execute(task, args.cwd, args.mode, args.model, args.effort, deadline,
+                           chat=bool(getattr(args, "chat", False)),
+                           attachments=list(getattr(args, "attach", []) or []))
     provider, model = _verify_session(payload, args.model)
+    if getattr(args, "json", False):
+        _usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        print(json.dumps({"status": "ok", "response": payload["response"],
+                          "sessionId": _session_id(payload), "usage": _usage},
+                         ensure_ascii=False))
+        return 0
     print(payload["response"])
     print(f"\n--- zcode-worker: modelo={model} provider={provider} modo={args.mode} "
           f"sessao={_session_id(payload)} ---")

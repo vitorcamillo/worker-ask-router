@@ -614,6 +614,8 @@ def _run_fast(config: Config, task_id: str, question: str, img_bytes, ext: str, 
             indir,
             "--queue-timeout",
             "10",
+            "--timeout",
+            str(timeout_s),
             "--json",
             "--spec",
             qpath,
@@ -625,7 +627,9 @@ def _run_fast(config: Config, task_id: str, question: str, img_bytes, ext: str, 
             for k, v in os.environ.items()
             if k != "WORKER_ASK_VISION_TOKEN" and not k.startswith("WAV_")
         }
-        env["ZCODE_WORKER_ALLOW_PAID"] = "1"
+        # Pago só via degrau zcode-pago do roteador (AGENTS.md 14/11): sem a
+        # variável o worker devolve 75 quando o Start Plan está indisponível.
+        env.pop("ZCODE_WORKER_ALLOW_PAID", None)
         try:
             proc = subprocess.Popen(
                 cmd,
