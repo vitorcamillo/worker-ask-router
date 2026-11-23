@@ -25,6 +25,11 @@
 # OPENCODE_ASK_GO_FALLBACK=0 desliga os Go fallbacks; OPENCODE_ASK_FREE_FALLBACK=0 desliga os free;
 # OPENCODE_ASK_BEAM_FALLBACK=0 desliga so o beam free.
 #
+# Contas Go: uma credencial opencode-go fica ativa no banco do opencode. Quando ela estoura a cota,
+# gira para a proxima credencial (estado por label com prazo de reset) antes de descer de degrau.
+# OPENCODE_ASK_ACCOUNT_ROTATE=0 desliga; OPENCODE_ASK_OC_DB aponta o banco. A troca e global ao
+# opencode, entao roda sob flock em /tmp e nunca e herdada pelo modelo.
+#
 # Isolamento: --standalone (servidor privado com este ambiente, nunca o servico compartilhado) e
 # XDG_CONFIG_HOME proprio por modo (~/.local/share/opencode-ask/xdg-<modo>) com AGENTS.md por link.
 # Travas por "policies" globais (deny rigido; projeto e aprovacao salva nao desfazem): so providers
@@ -64,7 +69,7 @@ while [ $# -gt 0 ]; do
     --timeout) timeout_s="$2"; shift 2 ;;
     --saida) saida="$2"; shift 2 ;;
     --list-models) list_models=1; shift ;;
-    -h|--help) sed -n '2,35p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
     --[a-zA-Z]*) echo "opencode-ask: flag desconhecida: $1 (veja opencode-ask --help)" >&2; exit 1 ;;
     *) prompt="$1"; shift ;;
   esac
@@ -463,6 +468,144 @@ if errors or not order:
 sys.stdout.write("".join(msgs[order[-1]]).strip())
 PY_EOF
 
+# Contas OpenCode Go: le so label/active/time_created (nunca value), sempre em modo somente leitura.
+# Estado: {"<label>": <epoch esgotada ate>} em ~/.local/state/opencode-ask/go-contas.json.
+cat >"$tmpd/contas.py" <<'PY_CONTAS_EOF'
+import json, os, sqlite3, sys, tempfile, time
+
+def carrega_estado(caminho):
+    try:
+        with open(caminho, encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def salva_estado(caminho, d):
+    pasta = os.path.dirname(caminho) or "."
+    os.makedirs(pasta, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".go-contas.", dir=pasta)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, caminho)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+def credenciais(db, ordenado=False):
+    con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+    try:
+        sql = ("SELECT label, active, time_created FROM credential "
+               "WHERE integration_id='opencode-go'")
+        if ordenado:
+            sql += " ORDER BY time_created, label"
+        return con.execute(sql).fetchall()
+    finally:
+        con.close()
+
+def esgotado(estado, label, agora):
+    try:
+        return float(estado.get(label, 0)) > float(agora)
+    except (TypeError, ValueError):
+        return False
+
+def main(argv):
+    if len(argv) < 2:
+        return 1
+    cmd = argv[0]
+    if cmd == "ativa":
+        for label, active, _criado in credenciais(argv[1]):
+            if active:
+                print(label)
+                return 0
+        return 1
+    if cmd == "total":
+        print(len(credenciais(argv[1])))
+        return 0
+    if cmd == "esgotada" and len(argv) == 4:
+        return 0 if esgotado(carrega_estado(argv[1]), argv[2], argv[3]) else 1
+    if cmd == "proxima" and len(argv) == 5:
+        db, caminho, agora, atual = argv[1], argv[2], argv[3], argv[4]
+        estado = carrega_estado(caminho)
+        for label, _active, _criado in credenciais(db, ordenado=True):
+            if label == atual or esgotado(estado, label, agora):
+                continue
+            print(label)
+            return 0
+        return 1
+    if cmd == "marca" and len(argv) == 4:
+        caminho, label, ate = argv[1], argv[2], int(float(argv[3]))
+        agora = int(time.time())
+        estado = {k: v for k, v in carrega_estado(caminho).items()
+                  if isinstance(v, (int, float)) and v >= agora - 7 * 86400}
+        estado[label] = ate
+        salva_estado(caminho, estado)
+        return 0
+    return 1
+
+try:
+    sys.exit(main(sys.argv[1:]))
+except SystemExit:
+    raise
+except BaseException:
+    sys.exit(1)
+PY_CONTAS_EOF
+
+OC_DB="${OPENCODE_ASK_OC_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db}"
+estado_contas="$HOME/.local/state/opencode-ask/go-contas.json"
+trava_contas="/tmp/opencode-ask-$(id -u).conta.lock"
+
+gira_conta() { # gira_conta <cota|pre> <label_da_tentativa>; rc 0 = pode repetir o mesmo modelo
+  local modo="$1" tent="$2" total ativa antiga proxima confere agora ate resp
+  [ "${OPENCODE_ASK_ACCOUNT_ROTATE:-1}" = 0 ] && return 1
+  [ -r "$OC_DB" ] || return 1
+  total="$(python3 -I "$tmpd/contas.py" total "$OC_DB" 2>/dev/null)" || return 1
+  [[ "$total" =~ ^[0-9]+$ ]] || return 1
+  [ "$total" -ge 2 ] || return 1
+  ativa="$(python3 -I "$tmpd/contas.py" ativa "$OC_DB" 2>/dev/null)" || return 1
+  [ -n "$ativa" ] || return 1
+  # Trava propria (fd 7) porque credential.active e global ao opencode; o fd 8 e a vaga.
+  exec 7>>"$trava_contas" || return 1
+  flock -w 30 7 || { exec 7>&-; return 1; }
+  if [ "$modo" = cota ]; then
+    agora="$(date +%s)"
+    ate=""
+    if [ -n "${WORKER_ASK_QUOTA_HELPER:-}" ]; then
+      # Copia com stderr junto: o helper de cota tambem le o diagnostico do CLI.
+      cp "$tmpd/erros.txt" "$tmpd/erros-quota.txt" 2>/dev/null
+      cat "$tmpd/stderr.txt" >>"$tmpd/erros-quota.txt" 2>/dev/null
+      resp="$(python3 "$WORKER_ASK_QUOTA_HELPER" "$tmpd/erros-quota.txt" 2>/dev/null)"
+      ate="$(printf '%s\n' "$resp" | sed -nE 's/.*worker-ask-quota-reset: *([0-9]+).*/\1/p' | tail -n 1)"
+    fi
+    [ -n "$ate" ] || ate=$(( agora + ${OPENCODE_ASK_QUOTA_RETRY:-3600} ))
+    python3 -I "$tmpd/contas.py" marca "$estado_contas" "$tent" "$ate" 2>/dev/null \
+      || { exec 7>&-; return 1; }
+  fi
+  # Outra execucao pode ter trocado a conta enquanto esperavamos a trava.
+  antiga="$(python3 -I "$tmpd/contas.py" ativa "$OC_DB" 2>/dev/null)" || { exec 7>&-; return 1; }
+  [ -n "$antiga" ] || { exec 7>&-; return 1; }
+  if [ "$antiga" != "$tent" ] \
+      && ! python3 -I "$tmpd/contas.py" esgotada "$estado_contas" "$antiga" "$(date +%s)" 2>/dev/null; then
+    exec 7>&-; return 0
+  fi
+  proxima="$(python3 -I "$tmpd/contas.py" proxima "$OC_DB" "$estado_contas" \
+    "$(date +%s)" "$antiga" 2>/dev/null)" || { exec 7>&-; return 1; }
+  [ -n "$proxima" ] || { exec 7>&-; return 1; }
+  (cd /tmp && timeout 60 "$OC" auth switch opencode-go "$proxima" </dev/null >/dev/null 2>&1 8>&- 7>&-)
+  confere="$(python3 -I "$tmpd/contas.py" ativa "$OC_DB" 2>/dev/null)" || { exec 7>&-; return 1; }
+  [ "$confere" = "$proxima" ] || { exec 7>&-; return 1; }
+  if [ "$modo" = pre ]; then
+    echo "opencode-ask: conta Go '$antiga' ainda sem cota; usando '$proxima'" >&2
+  else
+    echo "opencode-ask: conta Go '$antiga' sem cota; usando '$proxima'" >&2
+  fi
+  exec 7>&-
+  return 0
+}
+
 # Vagas + teto de RAM: cada `run --standalone` sobe um servidor proprio (~300-400 MB) e 8 em
 # paralelo com a maquina em swap derrubaram a sessao duas vezes em 23/10. OPENCODE_ASK_SLOTS (2)
 # chamadas simultaneas na maquina toda; as demais esperam OPENCODE_ASK_WAIT s (900) e saem 75.
@@ -531,7 +674,36 @@ tenta() { # roda + extrai; se o modelo nao tem a variante de esforco, repete sem
   fi
 }
 effort0="$effort"
-tenta "$model"
+trocas_contas=0
+tenta_contas() { # tenta <modelo>, girando de conta Go antes de desistir do modelo
+  local lbl=""
+  lbl="$(python3 -I "$tmpd/contas.py" ativa "$OC_DB" 2>/dev/null || true)"
+  tenta "$1"
+  while [ "$xrc" -ne 0 ] && [[ "$1" == opencode-go/* ]] && [[ "$1" != *-free ]] \
+      && [ "$trocas_contas" -lt 3 ] \
+      && grep -qiE "free-limit|status:429|quota|rate.?limit|usage limit|limit reached|too many requests|insufficient.?(credits|balance)" \
+           "$tmpd/erros.txt" "$tmpd/stderr.txt" 2>/dev/null \
+      && ! grep -qiE "no-route|model unavailable" "$tmpd/erros.txt" "$tmpd/stderr.txt" 2>/dev/null; do
+    if gira_conta cota "$lbl"; then
+      trocas_contas=$((trocas_contas + 1))
+      effort="$effort0"
+      lbl="$(python3 -I "$tmpd/contas.py" ativa "$OC_DB" 2>/dev/null || true)"
+      tenta "$1"
+    else
+      break
+    fi
+  done
+}
+# Pre-checagem: conta ativa ja marcada como esgotada no estado -> gira antes de gastar a chamada.
+if [ "${OPENCODE_ASK_ACCOUNT_ROTATE:-1}" != 0 ] \
+    && [[ "$model" == opencode-go/* ]] && [[ "$model" != *-free ]]; then
+  _ativa_pre="$(python3 -I "$tmpd/contas.py" ativa "$OC_DB" 2>/dev/null || true)"
+  if [ -n "$_ativa_pre" ] \
+      && python3 -I "$tmpd/contas.py" esgotada "$estado_contas" "$_ativa_pre" "$(date +%s)" 2>/dev/null; then
+    gira_conta pre "$_ativa_pre" || true
+  fi
+fi
+tenta_contas "$model"
 for prox in "${fallbacks[@]}"; do
   if [ "$xrc" -ne 0 ] && grep -qiE "free-limit|status:429|quota|rate.?limit|usage limit|limit reached|too many requests|insufficient.?(credits|balance)|no-route|model unavailable" "$tmpd/erros.txt" "$tmpd/stderr.txt"; then
     [ -n "$(classe "$prox")" ] || {
@@ -541,7 +713,7 @@ for prox in "${fallbacks[@]}"; do
     sufixo=""
     echo "opencode-ask: $model sem cota; usando $prox$sufixo" >&2
     model="$prox"; effort="$effort0"
-    tenta "$model"
+    tenta_contas "$model"
   else
     break
   fi

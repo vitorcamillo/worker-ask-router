@@ -1,8 +1,10 @@
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -15,10 +17,64 @@ PYTHON = sys.executable
 FAKE_OC_SOURCE = r'''#!/usr/bin/env python3
 import json
 import os
+import sqlite3
 import sys
 import time
 
 args = sys.argv[1:]
+
+
+def _oc_active():
+    db = os.environ.get("FAKE_OC_DB")
+    if not db:
+        return ""
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            row = con.execute(
+                "SELECT label FROM credential WHERE integration_id='opencode-go' AND active=1"
+            ).fetchone()
+        finally:
+            con.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+# auth nunca vai ao log de modelos
+if args and args[0] == "auth":
+    ok = False
+    if len(args) == 4 and args[1] == "switch" and args[2] == "opencode-go":
+        label = args[3]
+        db = os.environ.get("FAKE_OC_DB")
+        if db:
+            try:
+                con = sqlite3.connect(db)
+                try:
+                    existe = con.execute(
+                        "SELECT COUNT(*) FROM credential "
+                        "WHERE integration_id='opencode-go' AND label=?",
+                        (label,)).fetchone()[0]
+                    if existe:
+                        con.execute("UPDATE credential SET active=0 "
+                                    "WHERE integration_id='opencode-go'")
+                        con.execute("UPDATE credential SET active=1 "
+                                    "WHERE integration_id='opencode-go' AND label=?",
+                                    (label,))
+                        con.commit()
+                        ok = True
+                finally:
+                    con.close()
+            except Exception:
+                ok = False
+    if ok:
+        auth_log = os.environ.get("FAKE_OC_AUTH_LOG")
+        if auth_log:
+            with open(auth_log, "a", encoding="utf-8") as fh:
+                fh.write("switch " + args[3] + "\n")
+        sys.exit(0)
+    sys.exit(1)
+
 model = ""
 if "-m" in args:
     model = args[args.index("-m") + 1]
@@ -42,11 +98,15 @@ if sleep:
     time.sleep(sleep)
 
 quota_models = set((os.environ.get("FAKE_OC_QUOTA_MODELS") or "").split())
+quota_accounts = [a for a in (os.environ.get("FAKE_OC_QUOTA_ACCOUNTS") or "").split("|") if a]
 noroute_models = set((os.environ.get("FAKE_OC_NOROUTE_MODELS") or "").split())
 generic_fail = os.environ.get("FAKE_OC_GENERIC_FAIL") == "1"
 text = os.environ.get("FAKE_OC_TEXT", "ok")
 
-if model in quota_models:
+conta_esgotada = (model.startswith("opencode-go/") and not model.endswith("-free")
+                  and bool(quota_accounts) and _oc_active() in quota_accounts)
+
+if model in quota_models or conta_esgotada:
     size = int(os.environ.get("FAKE_OC_STDERR_SIZE", "0") or 0)
     msg = "quota exceeded: rate limit reached\n"
     sys.stderr.write(msg * max(1, size // len(msg) + 1) if size else msg)
@@ -108,19 +168,24 @@ class OpencodeAskTests(unittest.TestCase):
         (cache / "models.json").write_text(json.dumps(catalog))
         self.env = os.environ.copy()
         for key in list(self.env):
-            if key.startswith("OPENCODE_ASK_") or key == "CLAUDE_ASK_WORKER":
+            if key.startswith("OPENCODE_ASK_") or key in (
+                    "CLAUDE_ASK_WORKER", "XDG_DATA_HOME", "WORKER_ASK_QUOTA_HELPER"):
                 self.env.pop(key, None)
         self.env["HOME"] = str(self.home)
         self.env["OPENCODE_ASK_BIN"] = str(self.oc)
         self.env["FAKE_OC_LOG"] = str(self.log)
+        self.env["FAKE_OC_AUTH_LOG"] = str(Path(self.tmp.name) / "auth.log")
+        # Banco inexistente: rotacao de contas inativa nos testes antigos.
+        self.env["OPENCODE_ASK_OC_DB"] = str(Path(self.tmp.name) / "oc-inexistente.db")
         self.env["PATH"] = str(self.bindir) + os.pathsep + self.env.get("PATH", "")
         curl = self.bindir / "curl"
         curl.write_text("#!/bin/sh\\necho refused >&2\\nexit 1\\n")
         curl.chmod(0o755)
 
     def tearDown(self):
-        for path in Path("/tmp").glob("opencode-ask-" + self.lock_id + ".vaga*"):
-            path.unlink(missing_ok=True)
+        for pattern in (".vaga*", ".conta.lock"):
+            for path in Path("/tmp").glob("opencode-ask-" + self.lock_id + pattern):
+                path.unlink(missing_ok=True)
         self.tmp.cleanup()
 
     def _run(self, argv, env_extra=None, timeout=60):
@@ -134,6 +199,45 @@ class OpencodeAskTests(unittest.TestCase):
             env=env,
             timeout=timeout,
         )
+
+    def _accounts_db(self, labels=(("Conta A", 1, 1), ("Conta B", 0, 2))):
+        db = Path(self.tmp.name) / "opencode.db"
+        con = sqlite3.connect(db)
+        try:
+            con.execute(
+                "CREATE TABLE credential (id TEXT PRIMARY KEY, integration_id TEXT, label TEXT, "
+                "value TEXT, active INTEGER, time_created INTEGER)")
+            for i, (label, active, criado) in enumerate(labels, start=1):
+                con.execute(
+                    "INSERT INTO credential (id, integration_id, label, value, active, time_created) "
+                    "VALUES (?, 'opencode-go', ?, 'x', ?, ?)",
+                    ("id%d" % i, label, active, criado))
+            con.commit()
+        finally:
+            con.close()
+        self.env["OPENCODE_ASK_OC_DB"] = str(db)
+        self.env["FAKE_OC_DB"] = str(db)
+        return db
+
+    def _state_path(self):
+        return self.home / ".local" / "state" / "opencode-ask" / "go-contas.json"
+
+    def _active_label(self):
+        con = sqlite3.connect(self.env["FAKE_OC_DB"])
+        try:
+            row = con.execute(
+                "SELECT label FROM credential "
+                "WHERE integration_id='opencode-go' AND active=1").fetchone()
+        finally:
+            con.close()
+        return row[0] if row else None
+
+    def _auth_log(self):
+        p = Path(self.env["FAKE_OC_AUTH_LOG"])
+        return p.read_text(encoding="utf-8").splitlines() if p.exists() else []
+
+    def _logged(self):
+        return [m for m in (self.log.read_text().splitlines() if self.log.exists() else []) if m]
 
     def test_stderr_only_quota_triggers_beam(self):
         # Cota detectada so no stderr em todos os degraus antes do beam: a cadeia chega nele.
@@ -292,6 +396,65 @@ class OpencodeAskTests(unittest.TestCase):
         env_extra = {"FAKE_OC_QUOTA_MODELS": antes_beam, "FAKE_OC_STDERR_SIZE": "2000000"}
         r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"], env_extra=env_extra, timeout=60)
         self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+
+    def test_rotacao_conta_a_cota_gira_para_b(self):
+        # Cota so na Conta A: gira para a Conta B e repete o mesmo modelo.
+        self._accounts_db()
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"],
+                      env_extra={"FAKE_OC_QUOTA_ACCOUNTS": "Conta A"})
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertEqual(self._logged(), ["opencode-go/deepseek-v4.1-flash"] * 2)
+        self.assertEqual(self._auth_log(), ["switch Conta B"])
+        self.assertEqual(self._active_label(), "Conta B")
+        estado = json.loads(self._state_path().read_text(encoding="utf-8"))
+        self.assertGreater(estado["Conta A"], time.time())
+        self.assertIn("conta Go 'Conta A'", r.stderr)
+        self.assertIn("usando 'Conta B'", r.stderr)
+
+    def test_rotacao_cota_nas_duas_contas_uma_troca(self):
+        # Sem conta disponivel depois da troca, desce para o free com exatamente 1 switch.
+        self._accounts_db()
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"],
+                      env_extra={"FAKE_OC_QUOTA_ACCOUNTS": "Conta A|Conta B"})
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertIn("opencode/deepseek-v4.1-flash-free", self._logged())
+        self.assertEqual(len(self._auth_log()), 1)
+
+    def test_rotacao_desligada_comportamento_antigo(self):
+        self._accounts_db()
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"],
+                      env_extra={"FAKE_OC_QUOTA_ACCOUNTS": "Conta A",
+                                 "OPENCODE_ASK_ACCOUNT_ROTATE": "0"})
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertEqual(self._auth_log(), [])
+        self.assertIn("opencode/deepseek-v4.1-flash-free", self._logged())
+
+    def test_rotacao_pre_troca_conta_esgotada(self):
+        # Estado marca a Conta A esgotada: troca antes de rodar, sem gastar chamada nela.
+        self._accounts_db()
+        p = self._state_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"Conta A": time.time() + 3600}), encoding="utf-8")
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"])
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertEqual(self._logged(), ["opencode-go/deepseek-v4.1-flash"])
+        self.assertEqual(self._auth_log(), ["switch Conta B"])
+        self.assertIn("ainda sem cota", r.stderr)
+
+    def test_rotacao_noroute_nao_gira_conta(self):
+        self._accounts_db()
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"],
+                      env_extra={"FAKE_OC_NOROUTE_MODELS": "opencode-go/deepseek-v4.1-flash"})
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertEqual(self._auth_log(), [])
+
+    def test_rotacao_conta_unica_nao_gira(self):
+        self._accounts_db(labels=(("Conta A", 1, 1),))
+        r = self._run(["--cwd", str(self.home), "--mode", "plan", "task"],
+                      env_extra={"FAKE_OC_QUOTA_ACCOUNTS": "Conta A"})
+        self.assertEqual(r.returncode, 0, (r.returncode, r.stderr))
+        self.assertEqual(self._auth_log(), [])
+        self.assertIn("opencode/deepseek-v4.1-flash-free", self._logged())
 
     def _write_limits(self, content):
         d = self.home / ".config" / "opencode"
