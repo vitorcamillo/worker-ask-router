@@ -541,9 +541,12 @@ def _run_once(task, cwd, mode, model, effort, deadline, chat=False, attachments=
         env = dict(os.environ)
         env["ZCODE_PERSONAL_PROVIDER_CONFIG_FILE"] = temp_path
         env["ZCODE_DATA_BASE_DIR"] = AUTH_BASE
-        prompt = task if chat else PREAMBULO + task
-        command = [CLI, "-p", prompt, "--cwd", cwd, "--mode", mode,
-                   "--json", "--no-color"]
+        if chat:
+            command = [CLI, "-p", task, "--cwd", cwd, "--mode", mode,
+                       "--json", "--no-color"]
+        else:
+            command = [CLI, "-p", PREAMBULO + task, "--cwd", cwd, "--mode", mode,
+                       "--json", "--no-color"]
         for attachment in attachments or []:
             command.extend(["--attach", attachment])
         if mode == "edit":
