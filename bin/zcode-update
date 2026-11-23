@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Auto-update do bundle ZCode (glm/zcode.cjs) a partir do feed oficial publico."""
+import argparse
+import base64
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
+
+DEFAULT_MANIFEST = "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=linux-x64&channel=stable"
+DEFAULT_PREFIX = "https://cdn-zcode.z.ai/zcode/electron/releases/"
+UA = "worker-ask-zcode-update/1.0"
+MEMBERS = {
+    "opt/ZCode/resources/glm/zcode.cjs": "zcode.cjs",
+    "opt/ZCode/resources/config/provider/zcode-builtin.json": "zcode-builtin.json",
+}
+MAX_MEMBER = 64 * 1024 * 1024
+VER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+class Fail(Exception):
+    pass
+
+
+def vtuple(v):
+    return tuple(int(x) for x in v.split("."))
+
+
+def http_get(url, timeout):
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def parse_manifest(text):
+    version = None
+    files = []
+    cur = None
+    in_files = False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            in_files = line.startswith("files:")
+            cur = None
+            m = re.match(r"version:\s*['\"]?([^'\"\s]+)", line)
+            if m:
+                version = m.group(1)
+            continue
+        if not in_files:
+            continue
+        s = line.strip()
+        if s.startswith("- "):
+            cur = {}
+            files.append(cur)
+            s = s[2:].strip()
+        m = re.match(r"(url|sha512|size):\s*(.+)$", s)
+        if m and cur is not None:
+            cur[m.group(1)] = m.group(2).strip().strip("'\"")
+    if not version or not VER_RE.match(version):
+        raise Fail("versao invalida no manifest")
+    return version, files
+
+
+def read_local(cli_dir):
+    try:
+        v = open(os.path.join(cli_dir, "VERSION")).read().strip()
+        if VER_RE.match(v):
+            return v
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+def download(url, dest, size, sha512_b64):
+    h = hashlib.sha512()
+    n = 0
+    with http_get(url, 60) as r, open(dest, "wb") as f:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            n += len(chunk)
+            if n > size:
+                raise Fail("download maior que o size")
+            h.update(chunk)
+            f.write(chunk)
+    if n != size:
+        raise Fail("tamanho divergente")
+    if base64.b64encode(h.digest()).decode() != sha512_b64:
+        raise Fail("sha512 divergente")
+
+
+def extract(deb, staging):
+    got = set()
+    p = subprocess.Popen(["dpkg-deb", "--fsys-tarfile", deb], stdout=subprocess.PIPE)
+    try:
+        with tarfile.open(fileobj=p.stdout, mode="r|*") as tf:
+            for m in tf:
+                name = os.path.normpath(m.name).lstrip("/")
+                dst = MEMBERS.get(name)
+                if not dst or not m.isreg():
+                    continue
+                if m.size > MAX_MEMBER:
+                    raise Fail("membro grande demais")
+                src = tf.extractfile(m)
+                with open(os.path.join(staging, dst), "wb") as f:
+                    shutil.copyfileobj(src, f)
+                got.add(dst)
+    except tarfile.TarError as e:
+        raise Fail(f"tar invalido: {e}")
+    finally:
+        p.stdout.close()
+        rc = p.wait()
+    if rc != 0:
+        raise Fail("dpkg-deb falhou")
+    if got != set(MEMBERS.values()):
+        raise Fail("membros ausentes no deb")
+
+
+def smoke(staging):
+    js = os.path.join(staging, "zcode.cjs")
+    try:
+        r = subprocess.run(["node", js, "--version"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise Fail(f"smoke: {e}")
+    if r.returncode != 0 or not r.stdout.strip():
+        raise Fail("smoke falhou")
+    try:
+        json.load(open(os.path.join(staging, "zcode-builtin.json")))
+    except ValueError:
+        raise Fail("json invalido")
+
+
+def copy_prev(path):
+    if os.path.exists(path):
+        shutil.copy2(path, path + ".prev")
+
+
+def install(cli_dir, staging, version):
+    js = os.path.join(cli_dir, "zcode.cjs")
+    prov = os.path.join(cli_dir, "provider")
+    pj = os.path.join(prov, "zcode-builtin.json")
+    ver = os.path.join(cli_dir, "VERSION")
+    os.makedirs(prov, exist_ok=True)
+    for p in (js, pj, ver):
+        copy_prev(p)
+    os.chmod(os.path.join(staging, "zcode.cjs"), 0o755)
+    os.chmod(os.path.join(staging, "zcode-builtin.json"), 0o644)
+    os.replace(os.path.join(staging, "zcode.cjs"), js)
+    os.replace(os.path.join(staging, "zcode-builtin.json"), pj)
+    tmp = ver + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(version + "\n")
+    os.replace(tmp, ver)
+
+
+def rollback(cli_dir):
+    pairs = [os.path.join(cli_dir, p) for p in ("zcode.cjs", "provider/zcode-builtin.json", "VERSION")]
+    if not all(os.path.exists(p + ".prev") for p in pairs):
+        print("zcode-update: falhou (sem .prev)", file=sys.stderr)
+        return 1
+    for p in pairs:
+        os.replace(p + ".prev", p)
+    print("zcode-update: rollback para " + read_local(cli_dir))
+    return 0
+
+
+def run(args, cli_dir):
+    url = os.environ.get("ZCODE_UPDATE_MANIFEST_URL", DEFAULT_MANIFEST)
+    prefix = os.environ.get("ZCODE_UPDATE_ALLOWED_PREFIX", DEFAULT_PREFIX)
+    try:
+        with http_get(url, 30) as r:
+            text = r.read(1 << 20).decode("utf-8", "replace")
+    except Exception as e:
+        raise Fail(f"manifest: {e}")
+    remote, files = parse_manifest(text)
+    local = read_local(cli_dir)
+    if args.check:
+        print(f"zcode-update: local {local}, remota {remote}")
+        return 0
+    if vtuple(remote) < vtuple(local) or (vtuple(remote) == vtuple(local) and not args.force):
+        print(f"zcode-update: atualizado ({local})")
+        return 0
+    item = next((f for f in files if f.get("url", "").endswith("-linux-x64.deb")
+                 and f["url"].startswith(prefix)), None)
+    if not item or "sha512" not in item or not item.get("size", "").isdigit():
+        raise Fail("deb permitido nao encontrado no manifest")
+    size = int(item["size"])
+    if shutil.disk_usage(cli_dir).free < 3 * size:
+        raise Fail("espaco insuficiente")
+    staging = tempfile.mkdtemp(dir=cli_dir, prefix=".staging-")
+    try:
+        deb = os.path.join(staging, "pkg.deb")
+        download(item["url"], deb, size, item["sha512"])
+        extract(deb, staging)
+        os.unlink(deb)
+        smoke(staging)
+        install(cli_dir, staging, remote)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    print(f"zcode-update: {local} -> {remote}")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    ap.add_argument("--rollback", action="store_true")
+    args = ap.parse_args()
+    if os.environ.get("WORKER_AUTO_UPDATE") == "0":
+        print("zcode-update: desativado")
+        return 0
+    cli_dir = os.environ.get("ZCODE_CLI_DIR") or os.path.join(
+        os.path.expanduser("~"), ".local/share/zcode-cli/glm")
+    try:
+        os.makedirs(cli_dir, exist_ok=True)
+        lock = open(os.path.join(cli_dir, ".update.lock"), "w")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("zcode-update: outro update em andamento")
+            return 0
+        if args.rollback:
+            return rollback(cli_dir)
+        return run(args, cli_dir)
+    except Fail as e:
+        print(f"zcode-update: falhou ({e})", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"zcode-update: falhou ({type(e).__name__}: {e})", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

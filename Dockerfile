@@ -19,8 +19,9 @@ RUN groupadd --gid 10001 worker \
     && chown worker:worker /home/worker
 
 # O repo inteiro, filtrado pelo .dockerignore (sem testes, pontes, units e docs):
-# arquivo novo do worker-ask entra sem editar esta lista. As CLIs acima ficam
-# com versao fixa; o cache de camadas do build so reinstala quando ela muda.
+# arquivo novo do worker-ask entra sem editar esta lista. As CLIs acima sao o
+# piso fixo da imagem; o bin/cli-update (loop do entrypoint) instala versoes novas
+# no volume em worker-clis/current, que vem antes no PATH.
 COPY . /opt/worker-ask/
 
 RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
@@ -32,6 +33,8 @@ RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
         /opt/worker-ask/bin/codex-ask \
         /opt/worker-ask/bin/ask_presentation.py \
         /opt/worker-ask/bin/zcode-cli \
+        /opt/worker-ask/bin/zcode-update \
+        /opt/worker-ask/bin/cli-update \
         /opt/worker-ask/bin/zcode-worker \
         /opt/worker-ask/bin/zcode_headless_admit.py
 
@@ -42,7 +45,7 @@ RUN ln -s /opt/worker-ask/worker_router.py /usr/local/bin/worker-ask \
 # WAV_NO_MUSE=1. Sobrescrever para 0 faz o degrau muse da cadeia falhar
 # por binario ausente em vez de omitir o degrau.
 ENV HOME=/home/worker \
-    PATH=/opt/worker-ask/bin:$PATH \
+    PATH=/opt/worker-ask/bin:/home/worker/.local/share/worker-clis/current/bin:$PATH \
     WORKER_ASK_ORDEM=/opt/worker-ask/servico/ordem.json \
     WAV_BIND=0.0.0.0 \
     WAV_ALLOW_ANY_BIND=1 \

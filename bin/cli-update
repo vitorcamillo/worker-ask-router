@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Auto-update dos CLIs npm dos workers (releases versionados + symlink current)."""
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+NAME_RE = re.compile(r"^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$")
+VER_RE = re.compile(r"^\d+\.\d+\.\d+([-+].*)?$")
+DEFAULT_PKGS = "@opencode/cli,@openai/codex,@anthropic-ai/claude-code"
+
+
+class Fail(Exception):
+    pass
+
+
+def vtuple(v):
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", v)
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+
+def run(cmd, timeout, env=None):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise Fail("timeout: " + os.path.basename(cmd[0]))
+    except OSError as e:
+        raise Fail("erro ao executar %s: %s" % (os.path.basename(cmd[0]), e.strerror))
+
+
+def read_version(pkgdir):
+    try:
+        return json.loads((pkgdir / "package.json").read_text())["version"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def set_link(link, target):
+    tmp = link.parent / (".tmp-" + link.name)
+    if tmp.is_symlink() or tmp.exists():
+        tmp.unlink()
+    os.symlink(target, tmp)
+    os.replace(tmp, link)
+
+
+def link_target(link):
+    return os.readlink(link) if link.is_symlink() else None
+
+
+def main(argv):
+    if os.environ.get("WORKER_AUTO_UPDATE") == "0":
+        print("cli-update: desativado")
+        return 0
+    mode = "update"
+    for a in argv:
+        if a == "--check":
+            mode = "check"
+        elif a == "--rollback":
+            mode = "rollback"
+        else:
+            print("uso: cli-update [--check|--rollback]", file=sys.stderr)
+            return 2
+    home = os.environ.get("HOME", "")
+    root = Path(os.environ.get("WORKER_CLI_ROOT") or os.path.join(home, ".local/share/worker-clis"))
+    npm = os.environ.get("CLI_UPDATE_NPM", "npm")
+    pkgs = [p.strip() for p in os.environ.get("CLI_UPDATE_PACKAGES", DEFAULT_PKGS).split(",") if p.strip()]
+    root.mkdir(mode=0o755, parents=True, exist_ok=True)
+    lockf = open(root / ".update.lock", "a")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print("cli-update: outra atualizacao em curso")
+        return 0
+    new = None
+    try:
+        if mode == "rollback":
+            cur, prev = root / "current", root / "previous"
+            if not prev.is_symlink():
+                raise Fail("sem previous")
+            ct, pt = link_target(cur), link_target(prev)
+            set_link(cur, pt)
+            if ct:
+                set_link(prev, ct)
+            print("cli-update: rollback para %s" % pt)
+            return 0
+        for p in pkgs:
+            if not NAME_RE.match(p):
+                raise Fail("nome de pacote invalido")
+        glob = os.environ.get("CLI_UPDATE_GLOBAL_ROOT")
+        if not glob:
+            r = run([npm, "root", "-g"], 60)
+            glob = r.stdout.strip() if r.returncode == 0 else ""
+        installed, latest = {}, {}
+        for p in pkgs:
+            r = run([npm, "view", p, "version"], 60)
+            v = r.stdout.strip()
+            if r.returncode != 0 or not VER_RE.match(v):
+                raise Fail("npm view falhou para " + p)
+            latest[p] = v
+            iv = read_version(root / "current/lib/node_modules" / p)
+            if iv is None and glob:
+                iv = read_version(Path(glob) / p)
+            installed[p] = iv
+        if mode == "check":
+            for p in pkgs:
+                print("%s %s -> %s" % (p, installed[p] or "?", latest[p]))
+            return 0
+        target = {}
+        for p in pkgs:
+            i = installed[p]
+            target[p] = latest[p] if i is None or vtuple(latest[p]) > vtuple(i) else i
+        if not any(installed[p] is None or vtuple(latest[p]) > vtuple(installed[p]) for p in pkgs):
+            print("cli-update: atualizado")
+            return 0
+        if shutil.disk_usage(root).free < 1 << 30:
+            raise Fail("menos de 1 GiB livre")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        rel = root / "releases"
+        rel.mkdir(parents=True, exist_ok=True)
+        cand = rel / stamp
+        if cand.exists():
+            raise Fail("release ja existe")
+        cand.mkdir()
+        new = cand
+        r = run([npm, "install", "-g", "--prefix", str(new), "--no-audit", "--no-fund",
+                 "--loglevel=error"] + ["%s@%s" % (p, target[p]) for p in pkgs], 900)
+        if r.returncode != 0:
+            raise Fail("npm install rc=%d" % r.returncode)
+        env = dict(os.environ, DISABLE_AUTOUPDATER="1", CI="1")
+        for p in pkgs:
+            pj = new / "lib/node_modules" / p / "package.json"
+            try:
+                b = json.loads(pj.read_text()).get("bin") or {}
+            except (OSError, ValueError):
+                raise Fail("package.json ausente: " + p)
+            names = [os.path.basename(p)] if isinstance(b, str) else list(b)
+            for n in names:
+                if not re.match(r"^[A-Za-z0-9._-]+$", n):
+                    raise Fail("bin invalido em " + p)
+                if run([str(new / "bin" / n), "--version"], 60, env).returncode != 0:
+                    raise Fail("smoke falhou: " + n)
+        cur, prev = root / "current", root / "previous"
+        old = link_target(cur)
+        if old:
+            set_link(prev, old)
+        set_link(cur, "releases/" + stamp)
+        keep = {os.path.basename(x) for x in (link_target(cur), link_target(prev)) if x}
+        for d in rel.iterdir():
+            if d.name not in keep:
+                shutil.rmtree(d, ignore_errors=True)
+        new = None
+        for p in pkgs:
+            if installed[p] != target[p]:
+                print("cli-update: %s %s -> %s" % (p, installed[p] or "?", target[p]))
+        return 0
+    except Exception as e:
+        if new is not None:
+            shutil.rmtree(new, ignore_errors=True)
+        print("cli-update: falhou (%s)" % e, file=sys.stderr)
+        return 1
+    finally:
+        lockf.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

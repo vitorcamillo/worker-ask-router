@@ -21,10 +21,21 @@ if [ ! -e "$SECRET_FILE" ]; then
 fi
 export ZCODE_CREDENTIAL_SECRET_FILE="$SECRET_FILE"
 
-VERSION_FILE="$HOME/.local/share/zcode-cli/glm/VERSION"
-if [ -f "$VERSION_FILE" ]; then
-    ZCODE_APP_VERSION="$(head -n 1 "$VERSION_FILE")"
-    export ZCODE_APP_VERSION
+# ZCODE_APP_VERSION nao e fixado aqui: o bin/zcode-cli le glm/VERSION a cada chamada,
+# entao a versao acompanha o auto-update abaixo sem reiniciar o container.
+
+# Auto-update diario do bundle ZCode (feed oficial) e dos CLIs npm (opencode, codex,
+# claude) no volume. Cada script troca os arquivos atomicamente e, se falhar, deixa a
+# versao atual intacta. WORKER_AUTO_UPDATE=0 desliga.
+if [ "${WORKER_AUTO_UPDATE:-1}" != "0" ]; then
+    (
+        sleep "${WORKER_UPDATE_DELAY:-60}"
+        while :; do
+            timeout 1800 /opt/worker-ask/bin/zcode-update || true
+            timeout 1800 /opt/worker-ask/bin/cli-update || true
+            sleep "${WORKER_UPDATE_INTERVAL:-86400}"
+        done
+    ) </dev/null &
 fi
 
 exec "$@"
