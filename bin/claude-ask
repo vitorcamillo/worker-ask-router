@@ -63,13 +63,23 @@ if [ "$mode" = qa ]; then
   # ele pode ser /tmp ou conter o repositorio, e remonta-lo gravavel furaria
   # a contencao. Rede compartilhada: QA usa curl/navegador.
   command -v bwrap >/dev/null 2>&1 || { echo "claude-ask: modo qa exige bwrap (bubblewrap) para isolar a escrita do Bash" >&2; exit 1; }
+  qa_parent="$(dirname "$cwd")"
+  qa_tmpdir=/tmp
+  if [ "$qa_parent" = /tmp ]; then
+    # Pai = /tmp: o ro-bind abaixo substituiria o tmpfs privado e deixaria
+    # TMPDIR=/tmp somente leitura (mktemp quebra). Reserva um tmp privado
+    # gravavel dentro do cwd, remontado como tmpfs apos o bind do cwd.
+    qa_tmpdir="$cwd/.qa-tmp"
+    mkdir -p "$qa_tmpdir" || { echo "claude-ask: modo qa nao criou tmp privado em $qa_tmpdir" >&2; exit 1; }
+  fi
   qa_sandbox=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
-    --setenv TMPDIR /tmp --die-with-parent)
+    --setenv TMPDIR "$qa_tmpdir" --die-with-parent)
   # Pai do cwd volta somente leitura depois do tmpfs: sem isso, ../ a partir
   # do cwd criaria arquivo no tmpfs (falso sucesso) e um pai sob /tmp ficaria
   # oculto em vez de visivelmente ro. O cwd e remontado gravavel logo depois.
-  qa_sandbox+=(--ro-bind "$(dirname "$cwd")" "$(dirname "$cwd")"
+  qa_sandbox+=(--ro-bind "$qa_parent" "$qa_parent"
     --bind "$cwd" "$cwd" --chdir "$cwd")
+  [ "$qa_tmpdir" = /tmp ] || qa_sandbox+=(--tmpfs "$qa_tmpdir")
   [ -d "$HOME/.claude" ] && qa_sandbox+=(--bind "$HOME/.claude" "$HOME/.claude")
   [ -f "$HOME/.claude.json" ] && qa_sandbox+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
   # Um CLI sob /tmp ficaria oculto pelo tmpfs: reexpoe so o diretorio do

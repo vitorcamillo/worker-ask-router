@@ -160,6 +160,34 @@ if behavior == "qa_escape":
         json.dump(results, fh)
     print("resposta stub " + name)
     sys.exit(0)
+if behavior == "qa_tmp_probe":
+    # cwd diretamente sob /tmp: TMPDIR precisa aceitar escrita (tmp privado
+    # gravavel) sem liberar a escrita no pai (/tmp somente leitura).
+    results = {}
+    try:
+        with open(os.path.join(os.environ["TMPDIR"], "mktemp-probe.txt"), "w", encoding="utf-8") as fh:
+            fh.write("temp qa\\n")
+        results["tmp"] = "wrote"
+    except OSError:
+        results["tmp"] = "blocked"
+    parent_probe = os.path.join(os.path.dirname(os.getcwd()),
+                                os.path.basename(os.getcwd()) + "-parent-probe.txt")
+    try:
+        with open(parent_probe, "w", encoding="utf-8") as fh:
+            fh.write("PWNED\\n")
+        results["parent"] = "wrote"
+    except OSError:
+        results["parent"] = "blocked"
+    try:
+        with open("artifact.txt", "w", encoding="utf-8") as fh:
+            fh.write("artefato qa\\n")
+        results["inside"] = "wrote"
+    except OSError:
+        results["inside"] = "blocked"
+    with open("escape-results.json", "w", encoding="utf-8") as fh:
+        json.dump(results, fh)
+    print("resposta stub " + name)
+    sys.exit(0)
 print("erro generico do stub " + name, file=sys.stderr)
 sys.exit(1)
 '''
@@ -818,6 +846,29 @@ class ClaudeAskContratoTest(WrapperTestBase):
                                    "tmp": "blocked", "inside": "wrote"})
         with open(alvo, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "conteudo do repositorio\n")
+
+    def test_qa_cwd_diretamente_sob_tmp_preserva_tmp_gravavel(self):
+        # Regressao do achado MEDIA: com cwd=/tmp/<artefatos>, o ro-bind do
+        # pai (/tmp) substituia o tmpfs privado e TMPDIR=/tmp ficava somente
+        # leitura, quebrando mktemp. O pai deve seguir ro, o cwd gravavel e
+        # o TMPDIR privado gravavel.
+        qa_cwd = tempfile.mkdtemp(prefix="qa-artifacts-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, qa_cwd, True)
+        qa_cap = os.path.join(qa_cwd, "capture")
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", qa_cwd, "--mode", "qa",
+                           "tarefa qa sob /tmp"],
+            behaviors={"STUB_BEHAVIOR_CLAUDE": "qa_tmp_probe"},
+            extra_env={"STUB_CAPTURE_DIR": qa_cap})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(self.captures_in(qa_cap, "claude")), 1)
+        with open(os.path.join(qa_cwd, "escape-results.json"),
+                  encoding="utf-8") as fh:
+            results = json.load(fh)
+        self.assertEqual(results, {"tmp": "wrote", "parent": "blocked",
+                                   "inside": "wrote"})
+        self.assertFalse(os.path.exists(
+            "/tmp/" + os.path.basename(qa_cwd) + "-parent-probe.txt"))
 
     def test_remove_anthropic_env_na_chamada(self):
         proc = self.run_wrapper(
