@@ -557,6 +557,33 @@ def _proc_has_identity(pid: int, uid: int, starttime: int, job_id: str) -> bool:
     return b"--_job-child" in argv and job_id.encode("ascii") in argv
 
 
+def _proc_state(pid: int) -> Optional[str]:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    root = _PROC_ROOT
+    if not isinstance(root, str) or not os.path.isabs(root):
+        return None
+    try:
+        with open(os.path.join(root, str(pid), "stat"), encoding="ascii") as source:
+            line = source.read(4096)
+    except (OSError, UnicodeError):
+        return None
+    closing = line.rfind(")")
+    if closing < 0:
+        return None
+    fields = line[closing + 2 :].split()
+    return fields[0] if fields else None
+
+
+def _proc_confirmed_dead(pid: Any, uid: Any, starttime: Any) -> bool:
+    """``lost`` exige morte/reúso comprovados, não só falha transitória de identidade."""
+
+    details = _proc_details(pid)
+    if details is None or details[:2] != (uid, starttime):
+        return True
+    return _proc_state(pid) in {"Z", "X", "x"}
+
+
 def _own_process_identity(pid: int, attempts: int = 20) -> Optional[Tuple[int, int]]:
     for _ in range(attempts):
         found = _proc_stat(pid)
@@ -781,6 +808,11 @@ def read_status(job_id: str) -> dict:
                     isinstance(cancel_requested, (int, float))
                     and _now() - cancel_requested < _CANCEL_CONFIRM_GRACE
                 ):
+                    return _public(metadata)
+                # Processo vivo com o mesmo uid/starttime ainda gravará o
+                # próprio terminal (ex.: ``failed``); marcá-lo ``lost`` aqui
+                # envenenaria esse resultado de forma irreversível.
+                if not _proc_confirmed_dead(pid, uid, starttime):
                     return _public(metadata)
                 _set_terminal(directory, metadata, "lost", 1, 0.0)
                 _remove_input(directory)
@@ -1135,6 +1167,22 @@ def run_child(job_id: str, runner: Callable[[dict, str], Tuple[dict, int]]) -> i
         return 128 + int(error.signum)
     except Exception:
         # Falhas de validação antes do callback não devem vazar detalhes nem deixar input.
+        if metadata is None:
+            # A falha pode ter ocorrido ao carregar o metadata; recarregar sob
+            # o lock ainda permite gravar ``failed`` em vez de o pai ver ``lost``.
+            with contextlib.suppress(Exception):
+                with _job_lock(job_id) as locked_directory:
+                    directory = locked_directory
+                    loaded = _load_metadata(locked_directory, job_id)
+                    if loaded["status"] not in _TERMINAL:
+                        metadata = loaded
+                        output = loaded.get("output")
+                        dev, ino = loaded.get("outputDev"), loaded.get("outputIno")
+                        if (
+                            isinstance(dev, int) and not isinstance(dev, bool)
+                            and isinstance(ino, int) and not isinstance(ino, bool)
+                        ):
+                            expected_identity = (dev, ino)
         if directory is not None and metadata is not None:
             output = output or metadata.get("output")
             if isinstance(output, str) and expected_identity is not None:
