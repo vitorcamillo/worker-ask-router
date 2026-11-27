@@ -409,7 +409,10 @@ def test_temporary_provider_is_private_and_cleans_on_body_or_config_error(tmp_pa
             pass
 
 
-def test_temporary_provider_rejects_symlink_or_unprivate_state(tmp_path):
+def test_temporary_provider_rejects_symlink_or_unprivate_state(tmp_path, monkeypatch):
+    provider = tmp_path / "provider.json"
+    write_provider(provider)
+    monkeypatch.setattr(features.base, "PROVIDER_CONFIG", str(provider))
     target = tmp_path / "target"
     target.mkdir()
     symlink = tmp_path / "state"

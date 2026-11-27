@@ -364,6 +364,10 @@ def _run_start_rate_limit(tmp_path, monkeypatch, *, mode, timeout, start_failure
     as primeiras `start_failures` chamadas; as do plano pago respondem ok."""
     db = tmp_path / "db.sqlite"
     make_selection_db(db, session="sess_1", provider=db_provider)
+    # Provider sintético: sem isto o teste lê o provider_config real da home.
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({"defaultModelSelection": {"providerId": base.PROVIDER_ID}}), encoding="utf-8")
+    monkeypatch.setattr(cli.base, "PROVIDER_CONFIG", str(provider))
     monkeypatch.delenv("ZCODE_WORKER_START_PLAN", raising=False)  # Start ativo (conftest desliga)
     monkeypatch.setattr(cli.base, "STATE", str(tmp_path / "state"))
     monkeypatch.setattr(cli.base, "global_slot", lambda *a: contextlib.nullcontext())
