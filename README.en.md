@@ -2,7 +2,7 @@
 
 [Português](README.md) · **English**
 
-![MIT](https://img.shields.io/badge/license-MIT-green) ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
+[![CI](https://github.com/vitorcamillo/worker-ask-router/actions/workflows/ci.yml/badge.svg)](https://github.com/vitorcamillo/worker-ask-router/actions/workflows/ci.yml) ![MIT](https://img.shields.io/badge/license-MIT-green) ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-supported-FCC624?logo=linux&logoColor=black)
 
 The `worker-ask-router` routes coding slices across the Codex, Claude, ZCode, Muse, and OpenCode executors from a single command. The installed command is still called `worker-ask`. When a provider hits its quota (exit 75) or the executable is missing, the next executor in the chain takes over with no manual intervention.
 

@@ -2,7 +2,7 @@
 
 **Português** · [English](README.en.md)
 
-![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-suportado-FCC624?logo=linux&logoColor=black)
+[![CI](https://github.com/vitorcamillo/worker-ask-router/actions/workflows/ci.yml/badge.svg)](https://github.com/vitorcamillo/worker-ask-router/actions/workflows/ci.yml) ![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-suportado-FCC624?logo=linux&logoColor=black)
 
 O `worker-ask-router` roteia fatias de codificação entre os executores Codex, Claude, ZCode, Muse e OpenCode a partir de um único comando. O comando instalado continua se chamando `worker-ask`. Quando um provedor atinge a cota (saída 75) ou o executável está ausente, o próximo executor da cadeia assume sem intervenção manual.
 
