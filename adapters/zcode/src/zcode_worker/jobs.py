@@ -1181,6 +1181,7 @@ def run_child(job_id: str, runner: Callable[[dict, str], Tuple[dict, int]]) -> i
                         if (
                             isinstance(dev, int) and not isinstance(dev, bool)
                             and isinstance(ino, int) and not isinstance(ino, bool)
+                            and _stdout_matches_output((dev, ino))
                         ):
                             expected_identity = (dev, ino)
         if directory is not None and metadata is not None:

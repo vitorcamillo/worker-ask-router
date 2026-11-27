@@ -1029,6 +1029,39 @@ def test_run_child_rejects_foreign_identity_and_stdout(isolated_state, tmp_path,
     assert jobs.read_status(stdout_id)["status"] == "failed"
 
 
+def test_run_child_recovery_rejects_forged_output_identity(isolated_state, tmp_path, monkeypatch):
+    job_id = "8" * 32
+    directory, _output, metadata = prepare_direct_job(isolated_state, tmp_path, job_id)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"victim-original")
+    victim.chmod(0o600)
+    victim_stat = victim.stat()
+    jobs._atomic_write(
+        jobs._metadata_path(str(directory)),
+        {
+            **metadata,
+            "output": str(victim),
+            "outputDev": victim_stat.st_dev,
+            "outputIno": victim_stat.st_ino,
+        },
+        limit=64 * 1024,
+    )
+    real_load = jobs._load_metadata
+    calls = {"count": 0}
+
+    def flaky_load(directory_arg, job_id_arg):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise base.WorkerError("falha transitória injetada")
+        return real_load(directory_arg, job_id_arg)
+
+    monkeypatch.setattr(jobs, "_load_metadata", flaky_load)
+    monkeypatch.setattr(jobs, "_stdout_matches_output", lambda _identity: False)
+    assert jobs.run_child(job_id, lambda *_: pytest.fail("callback não deve rodar")) == 1
+    assert victim.read_bytes() == b"victim-original"
+    assert jobs.read_status(job_id)["status"] == "failed"
+
+
 def test_run_child_terminated_while_waiting_for_lock(isolated_state, tmp_path, monkeypatch):
     job_id = "c" * 32
     prepare_direct_job(isolated_state, tmp_path, job_id)
