@@ -25,6 +25,7 @@ if [ -f "$_kf" ]; then
 fi
 
 cwd="" mode="plan" prompt="" model="" effort="" com_tools="" only_tools="" mcp_config=""
+qa_sandbox=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --cwd) cwd="$2"; shift 2 ;;
@@ -43,8 +44,9 @@ case "$mode" in
   write) perm=acceptEdits; sem_tools="Bash" ;;  # worker sem shell, como ZCode/Muse/OpenCode
   # qa: cliente do produto (etapa QA do git-revisor): so shell (curl/navegador),
   # sem editar nem delegar. --tools restringe as ferramentas disponiveis (so
-  # --allowedTools nao restringe) e MCPs sao desligados explicitamente; a
-  # escrita fica num diretorio de artefatos vazio e separado (validado abaixo).
+  # --allowedTools nao restringe) e MCPs sao desligados explicitamente. Como o
+  # Bash pre-aprovado escreveria em qualquer caminho, a contencao e de SO:
+  # bwrap com raiz somente leitura e escrita so no cwd de artefatos (abaixo).
   qa)    perm=default; com_tools="Bash"; only_tools="Bash"; mcp_config='{"mcpServers":{}}'; sem_tools="Edit Write NotebookEdit Agent" ;;
   *) echo "modo invalido: $mode (plan|write|qa)" >&2; exit 1 ;;
 esac
@@ -54,6 +56,17 @@ if [ "$mode" = qa ]; then
     echo "claude-ask: modo qa exige --cwd diretorio vazio (artefatos), nao o repositorio" >&2
     exit 1
   fi
+  # Isolamento efetivo (fail-closed): sem bwrap o Bash escaparia do cwd por
+  # caminho absoluto ou ../, entao o QA nao roda desprotegido. Raiz ro; escrita
+  # so no cwd de artefatos, no estado do proprio Claude (~/.claude, necessario
+  # ao CLI) e no TMPDIR do chamador. Rede compartilhada: QA usa curl/navegador.
+  command -v bwrap >/dev/null 2>&1 || { echo "claude-ask: modo qa exige bwrap (bubblewrap) para isolar a escrita do Bash" >&2; exit 1; }
+  qa_sandbox=(bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
+    --bind "$cwd" "$cwd" --chdir "$cwd" --die-with-parent)
+  [ -d "$HOME/.claude" ] && qa_sandbox+=(--bind "$HOME/.claude" "$HOME/.claude")
+  [ -f "$HOME/.claude.json" ] && qa_sandbox+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
+  [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR:-}" ] && qa_sandbox+=(--bind "$TMPDIR" "$TMPDIR")
+  qa_sandbox+=(--)
 fi
 
 # Contrato de resposta, identico nos wrappers zcode-worker/codex-ask/claude-ask:
@@ -94,7 +107,7 @@ log="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$log" "$err"' EXIT
 # (relê a conversa sem cache; ver § Claude: workers e exceções).
 cd "$cwd" && env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN CLAUDE_ASK_WORKER=1 \
   CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 \
-  timeout 1200 claude -p ${model:+--model "$model"} ${effort:+--effort "$effort"} --permission-mode "$perm" ${only_tools:+--tools "$only_tools"} ${com_tools:+--allowedTools "$com_tools"} ${sem_tools:+--disallowedTools "$sem_tools"} ${mcp_config:+--mcp-config "$mcp_config" --strict-mcp-config} -- "$prompt" </dev/null >"$log" 2>"$err"
+  timeout 1200 ${qa_sandbox[@]+"${qa_sandbox[@]}"} claude -p ${model:+--model "$model"} ${effort:+--effort "$effort"} --permission-mode "$perm" ${only_tools:+--tools "$only_tools"} ${com_tools:+--allowedTools "$com_tools"} ${sem_tools:+--disallowedTools "$sem_tools"} ${mcp_config:+--mcp-config "$mcp_config" --strict-mcp-config} -- "$prompt" </dev/null >"$log" 2>"$err"
 rc=$?
 if [ $rc -eq 0 ]; then
   cat "$log"; echo -e "\n--- claude-ask: modo=$mode modelo=${model:-padrao}${effort:+ esforco=$effort} ---"; exit 0

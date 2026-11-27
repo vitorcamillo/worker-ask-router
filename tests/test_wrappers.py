@@ -134,6 +134,28 @@ if behavior == "fail_path_quota":
 if behavior == "fail_quota_exit75":
     print("ERRO: cota do ZCode esgotada", file=sys.stderr)
     sys.exit(75)
+if behavior == "qa_escape":
+    # Tentativa real de escrita do "shell": fora do cwd (absoluto e relativo
+    # ../) deve ser bloqueada pelo isolamento; dentro do cwd deve funcionar.
+    results = {}
+    for key, target in (("abs", os.environ.get("STUB_ESCAPE_ABS", "")),
+                        ("rel", os.environ.get("STUB_ESCAPE_REL", ""))):
+        try:
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write("PWNED\\n")
+            results[key] = "wrote"
+        except OSError:
+            results[key] = "blocked"
+    try:
+        with open("artifact.txt", "w", encoding="utf-8") as fh:
+            fh.write("artefato qa\\n")
+        results["inside"] = "wrote"
+    except OSError:
+        results["inside"] = "blocked"
+    with open("escape-results.json", "w", encoding="utf-8") as fh:
+        json.dump(results, fh)
+    print("resposta stub " + name)
+    sys.exit(0)
 print("erro generico do stub " + name, file=sys.stderr)
 sys.exit(1)
 '''
@@ -210,9 +232,13 @@ class WrapperTestBase(unittest.TestCase):
         return subprocess.run([os.path.join(self.wrappers, name), *args], **kwargs)
 
     def captures(self, name):
+        return self.captures_in(self.capdir, name)
+
+    @staticmethod
+    def captures_in(capdir, name):
         records = []
-        for fname in sorted(f for f in os.listdir(self.capdir) if f.startswith(name + ".")):
-            with open(os.path.join(self.capdir, fname), encoding="utf-8") as fh:
+        for fname in sorted(f for f in os.listdir(capdir) if f.startswith(name + ".")):
+            with open(os.path.join(capdir, fname), encoding="utf-8") as fh:
                 records.append(json.load(fh))
         return records
 
@@ -690,10 +716,14 @@ class ClaudeAskContratoTest(WrapperTestBase):
 
     def test_qa_so_bash_sem_mcp_e_contrato(self):
         task = "tarefa qa claude"
+        # Sob o bwrap do qa so o cwd de artefatos e gravavel: a captura do
+        # stub precisa ficar dentro dele (o capdir padrao fica somente leitura).
+        qa_cap = os.path.join(self.cwd, "capture")
         proc = self.run_wrapper(
-            "claude-ask", ["--cwd", self.cwd, "--mode", "qa", task])
+            "claude-ask", ["--cwd", self.cwd, "--mode", "qa", task],
+            extra_env={"STUB_CAPTURE_DIR": qa_cap})
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        argv = self.captures("claude")[0]["argv"]
+        argv = self.captures_in(qa_cap, "claude")[0]["argv"]
         self.assertEqual(self.flag(argv, "--permission-mode"), "default")
         # --tools restringe as disponiveis; --allowedTools so pre-aprova.
         self.assertEqual(self.flag(argv, "--tools"), "Bash")
@@ -719,6 +749,36 @@ class ClaudeAskContratoTest(WrapperTestBase):
         self.assertEqual(self.captures("claude"), [])
         with open(alvo, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "conteudo do repositorio\n")
+
+    def test_qa_bash_nao_escreve_fora_do_cwd_vazio(self):
+        # Contencao real (nao so captura de argv): com cwd vazio aceito, o
+        # stub tenta alterar arquivos "do repositorio" por caminho absoluto
+        # e por ../ relativo; o bwrap deve bloquear ambos e permitir artefato.
+        abs_alvo = os.path.join(self.root, "repo-abs.txt")
+        rel_alvo = os.path.join(self.root, "repo-rel.txt")
+        for alvo in (abs_alvo, rel_alvo):
+            with open(alvo, "w", encoding="utf-8") as fh:
+                fh.write("conteudo do repositorio\n")
+        qa_cap = os.path.join(self.cwd, "capture")
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", self.cwd, "--mode", "qa",
+                           "tente escrever fora do cwd"],
+            behaviors={"STUB_BEHAVIOR_CLAUDE": "qa_escape"},
+            extra_env={"STUB_CAPTURE_DIR": qa_cap,
+                       "STUB_ESCAPE_ABS": abs_alvo,
+                       "STUB_ESCAPE_REL": "../repo-rel.txt"})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.cwd, "escape-results.json"),
+                  encoding="utf-8") as fh:
+            results = json.load(fh)
+        self.assertEqual(results, {"abs": "blocked", "rel": "blocked",
+                                   "inside": "wrote"})
+        for alvo in (abs_alvo, rel_alvo):
+            with open(alvo, encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), "conteudo do repositorio\n")
+        with open(os.path.join(self.cwd, "artifact.txt"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "artefato qa\n")
 
     def test_remove_anthropic_env_na_chamada(self):
         proc = self.run_wrapper(
