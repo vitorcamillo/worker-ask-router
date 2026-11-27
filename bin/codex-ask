@@ -58,10 +58,19 @@ case "$mode" in
   plan) args=(-m "${model:-gpt-6-luna}" -c "model_reasoning_effort=${effort:-high}" -s read-only) ;;
   review) args=(-m "${REVIEW_SOL_MODEL:-gpt-6.1-sol}" -c "model_reasoning_effort=${REVIEW_EFFORT:-medium}" -s read-only) ;;
   write)  args=(-m "${model:-gpt-6-luna}" -c "model_reasoning_effort=${effort:-high}" -s workspace-write) ;;
-  # qa: cliente do produto (etapa QA do git-revisor): shell e rede, escrita so no cwd (diretorio vazio).
+  # qa: cliente do produto (etapa QA do git-revisor): shell e rede, escrita so num
+  # diretorio de artefatos vazio e separado (validado abaixo); o repositorio nunca
+  # e o cwd de escrita.
   qa)     args=(-m "${model:-gpt-6-luna}" -c "model_reasoning_effort=${effort:-medium}" -s workspace-write -c sandbox_workspace_write.network_access=true) ;;
   *) echo "modo invalido: $mode (review|plan|write|qa)" >&2; exit 1 ;;
 esac
+
+if [ "$mode" = qa ]; then
+  if [ ! -d "$cwd" ] || ! _qa_entries="$(ls -A "$cwd" 2>/dev/null)" || [ -n "$_qa_entries" ]; then
+    echo "codex-ask: modo qa exige --cwd diretorio vazio (artefatos), nao o repositorio" >&2
+    exit 1
+  fi
+fi
 
 # Contrato de resposta, identico nos wrappers zcode-worker/codex-ask/claude-ask:
 # heredoc com delimitador QUOTED (sem expansao), concatenado ao prompt somente apos

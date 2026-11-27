@@ -430,6 +430,34 @@ class CodexAskContratoTest(WrapperTestBase):
         self.assertEqual(self.flag(argv, "-c"), "model_reasoning_effort=high")
         self.assert_contract_prefixed(argv[-1], task)
 
+    def test_qa_workspace_write_rede_e_contrato(self):
+        task = "tarefa qa codex"
+        proc = self.run_wrapper(
+            "codex-ask", ["--cwd", self.cwd, "--mode", "qa", task])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        argv = self.captures("codex")[0]["argv"]
+        self.assertEqual(self.flag(argv, "-m"), "gpt-6-luna")
+        self.assertEqual(self.flag(argv, "-c"), "model_reasoning_effort=medium")
+        self.assertEqual(self.flag(argv, "-s"), "workspace-write")
+        self.assertIn("sandbox_workspace_write.network_access=true", argv)
+        self.assertEqual(self.flag(argv, "-C"), self.cwd)
+        self.assert_contract_prefixed(argv[-1], task)
+
+    def test_qa_recusa_cwd_nao_vazio_sem_chamar_cli(self):
+        # cwd com conteudo simula o repositorio: QA nao pode receber escrita
+        # nele (nem via shell); a recusa vem antes de qualquer chamada ao CLI.
+        alvo = os.path.join(self.cwd, "repo.txt")
+        with open(alvo, "w", encoding="utf-8") as fh:
+            fh.write("conteudo do repositorio\n")
+        proc = self.run_wrapper(
+            "codex-ask", ["--cwd", self.cwd, "--mode", "qa",
+                          "tente escrever em repo.txt"])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("diretorio vazio", proc.stderr)
+        self.assertEqual(self.captures("codex"), [])
+        with open(alvo, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "conteudo do repositorio\n")
+
     def test_prompt_malicioso_e_dado_nao_executavel(self):
         pwn1 = os.path.join(self.capdir, "PWNED1")
         pwn2 = os.path.join(self.capdir, "PWNED2")
@@ -659,6 +687,38 @@ class ClaudeAskContratoTest(WrapperTestBase):
         self.assertEqual(self.flag(argv, "--model"), "fable")
         self.assertEqual(self.flag(argv, "--effort"), "high")
         self.assert_contract_prefixed(argv[-1], task)
+
+    def test_qa_so_bash_sem_mcp_e_contrato(self):
+        task = "tarefa qa claude"
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", self.cwd, "--mode", "qa", task])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        argv = self.captures("claude")[0]["argv"]
+        self.assertEqual(self.flag(argv, "--permission-mode"), "default")
+        # --tools restringe as disponiveis; --allowedTools so pre-aprova.
+        self.assertEqual(self.flag(argv, "--tools"), "Bash")
+        self.assertEqual(self.flag(argv, "--allowedTools"), "Bash")
+        self.assertEqual(self.flag(argv, "--disallowedTools"),
+                         "Edit Write NotebookEdit Agent")
+        # MCPs desligados explicitamente: config vazia + strict.
+        self.assertEqual(self.flag(argv, "--mcp-config"), '{"mcpServers":{}}')
+        self.assertIn("--strict-mcp-config", argv)
+        self.assert_contract_prefixed(argv[-1], task)
+
+    def test_qa_recusa_cwd_nao_vazio_sem_chamar_cli(self):
+        # cwd com conteudo simula o repositorio: Bash irrestrito escreveria
+        # nele, entao o QA recusa esse cwd antes de qualquer chamada ao CLI.
+        alvo = os.path.join(self.cwd, "repo.txt")
+        with open(alvo, "w", encoding="utf-8") as fh:
+            fh.write("conteudo do repositorio\n")
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", self.cwd, "--mode", "qa",
+                           "tente escrever em repo.txt"])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("diretorio vazio", proc.stderr)
+        self.assertEqual(self.captures("claude"), [])
+        with open(alvo, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "conteudo do repositorio\n")
 
     def test_remove_anthropic_env_na_chamada(self):
         proc = self.run_wrapper(
