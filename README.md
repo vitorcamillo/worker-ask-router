@@ -1,31 +1,43 @@
-# worker-ask
+# worker-ask-router
+
+**Português** · [English](README.en.md)
 
 ![MIT](https://img.shields.io/badge/licen%C3%A7a-MIT-green) ![Python](https://img.shields.io/badge/Python-3-3776AB?logo=python&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-suportado-FCC624?logo=linux&logoColor=black)
 
-**In English:** a single `worker-ask` command that routes coding tasks across Codex, Claude Code, ZCode, Muse and OpenCode, with automatic fallback when one provider hits its usage limit.
-
-[Licença MIT](LICENSE) · [Como contribuir](CONTRIBUTING.md)
+O `worker-ask-router` roteia fatias de codificação entre os executores Codex, Claude, ZCode, Muse e OpenCode a partir de um único comando. O comando instalado continua se chamando `worker-ask`. Quando um provedor atinge a cota (saída 75) ou o executável está ausente, o próximo executor da cadeia assume sem intervenção manual.
 
 ![Demonstração do worker-ask-router](docs/demo.png)
 
 *`ask-doctor` conferindo a cadeia de wrappers (Codex, Claude, ZCode, Muse e OpenCode) antes de rotear tarefas.*
 
-Repositório único do roteador e de todos os wrappers `-ask` locais. Não contém código do iptzao nem de outro projeto.
+## Sumário
 
-## Fontes
+- [Recursos](#recursos)
+- [Início rápido](#início-rápido)
+- [Uso](#uso)
+- [Como funciona](#como-funciona)
+- [Recursos avançados](#recursos-avançados)
+- [Limitações e uso responsável](#limitações-e-uso-responsável)
+- [Documentação](#documentação)
+- [Contribuição](#contribuição)
+- [Licença](#licença)
 
-- `worker_router.py`: seleção de executores, timeout total, cooldown e verificação dos arquivos autorizados.
-- `bin/codex-ask`, `claude-ask`, `muse-ask`, `opencode-ask` e `bonsai-ask`: wrappers de cada sistema.
-- `bin/ask-doctor` e `ask-check`: diagnóstico de interfaces e atualizações; o modo completo do doctor faz chamadas reais.
-- `scripts/install.py`: instalação conjunta e repetível, com backups de código e rollback.
-- `adapters/bonsai/`: cliente e guardas GameMode/GPU, sem chave, modelo ou serviço provisionado.
-- `bin/ask_presentation.py`: apresentação do terminal.
-- `adapters/zcode/`: engine, persistência de autenticação, launcher e testes do ZCode.
-- `bin/zcode-worker`, `bin/zcode-cli` e `bin/zcode_headless_admit.py`: entrada local e admissão de processos.
+## Recursos
 
-Os binários nativos de Codex, Claude, Muse e OpenCode e o backend Bonsai continuam sendo dependências externas instaladas no sistema. O bundle proprietário do ZCode também é externo. Credenciais, sessões, bancos, caches e relatórios gerados não entram no Git.
+- Troca de executor sem retrabalho: o fallback automático aciona o próximo da cadeia quando um provedor atinge a cota (saída 75) ou o executável está ausente.
+- Orçamento por fatia: `--task-id` registra cada execução em `runs.jsonl` e limita a 4 execuções por tarefa.
+- Isolamento opcional por worktree: o worker edita uma cópia do projeto e só os arquivos autorizados voltam ao diretório real.
+- Observabilidade da cadeia: apresentação no terminal, log com `--log` e métricas por execução com `scripts/runs_report.py`.
+- Cota sem sondagem: o roteador lê o prazo de liberação informado pelo provedor e pula executores em cooldown até o vencimento.
+- Instalação repetível: `python3 scripts/install.py` valida fontes e destinos, troca links atomicamente e tenta restaurar os arquivos anteriores em falha.
 
-## Instalação conjunta
+## Início rápido
+
+Requisitos:
+
+- Linux com Python 3.10+.
+- Node, necessário para o launcher ZCode.
+- CLIs de cada provedor instalados e autenticados fora do repositório.
 
 ```bash
 python3 scripts/install.py
@@ -33,41 +45,43 @@ python3 scripts/install.py
 python3 scripts/install.py --home /caminho/de/staging
 ```
 
-O instalador valida todas as fontes e destinos antes de substituir código, recusa pais simbólicos, diretórios e destinos compartilhados por hardlink, e usa trava contra instalações concorrentes. Os links são trocados atomicamente por arquivo; uma falha tratada tenta restaurar os arquivos anteriores; restauração incompleta é um erro explícito e mantém os backups. Backups de código ficam em `~/.local/state/worker-ask/install-backups/`. Um encerramento forçado ou queda de energia pode deixar a instalação parcial: execute novamente ou restaure os backups. O core ZCode permanece arquivo regular. Credenciais, sessões, catálogos de conta, configurações, serviços e modelos não são instalados nem migrados.
-
-A guarda Bonsai requer PyGObject/Gio (`gi`) no Python do sistema. A inclusão de `bonsai-ask` não muda a cadeia do roteador: Bonsai permanece disponível diretamente, com suas guardas de jogo/GPU.
-
-## Uso
-
-Python 3.10+, Linux, executores instalados e autenticados fora do repositório. Node é necessário para o launcher ZCode. O comando instalado `~/.local/bin/worker-ask` aponta para `worker_router.py` desta raiz.
+O comando instalado `~/.local/bin/worker-ask` aponta para `worker_router.py` desta raiz. O menor caminho até o primeiro resultado:
 
 ```bash
 worker-ask --cwd /caminho/do/projeto --orchestrator codex --mode plan "tarefa"
 worker-ask --cwd /caminho/do/projeto --orchestrator codex --mode write --allowed-file src/exemplo.py "tarefa"
 ```
 
-O roteador pula o executor da plataforma orquestradora. Fallback automático ocorre somente em saída 75 ou executável ausente. Saída 1 para; incompatibilidade conhecida do launcher apresenta diagnóstico estático, sem imprimir stderr privado. Em escrita, mudanças nos arquivos autorizados após saída 75 bloqueiam o fallback. Sem isolamento, a lista de arquivos é verificação de estado, não sandbox; com o isolamento ligado (abaixo), só os arquivos autorizados voltam para o projeto.
+## Uso
 
-### Isolamento por worktree (opcional, desligado por padrão)
+Opções de linha de comando (`worker-ask --help` mostra o texto completo):
 
-Com `WORKER_ASK_ISOLATION=write` (ou `all`, que inclui `--mode plan`), o worker roda numa cópia do projeto e não no diretório real. Também liga por projeto: arquivo `.worker-ask-isolation` com `write` ou `all` entre o `--cwd` e a raiz do repositório. A variável vence o arquivo; `off` desliga.
+| Opção | Função |
+|---|---|
+| `--cwd` | Diretório do projeto onde o worker roda. |
+| `--mode {plan,write}` | `plan` só lê; `write` edita (padrão). |
+| `--providers` | Restringe a chamada aos provedores listados, separados por vírgula. |
+| `--spec` | Arquivo com a especificação da tarefa. |
+| `prompt` | Tarefa em texto livre, como argumento posicional. |
+| `--timeout` | Prazo total em segundos (padrão 1800). |
+| `--step-timeout` | Prazo por tentativa em segundos (padrão 900). |
+| `--orchestrator {codex,claude,zcode,muse,opencode}` | Quem delega; não exclui executores da mesma plataforma. |
+| `--task-id` | Identifica a fatia; grava no `runs.jsonl` e habilita o orçamento de 4 execuções. |
+| `--mark-redo ID` | Registra um evento redo para a tarefa e sai. |
+| `--allowed-file` | Arquivo que a fatia pode criar ou editar; repetir por arquivo (máximo 128). |
+| `--no-muse` | Exclui o Muse desta chamada. |
+| `--allow-muse` | Obsoleto, mantido por compatibilidade (Muse já é padrão). |
+| `--retry-exhausted` | Reavalia manualmente executores bloqueados por cota desconhecida. |
+| `--status` | Mostra vagas de isolamento e prazos de cota, e sai. |
+| `--refresh-availability` | Atualiza a tabela de disponibilidade e sai. |
+| `--stats` | Imprime o resumo JSON do `runs.jsonl` e sai. |
+| `--log ARQ` | Grava stdout, stderr e a linha final `exit=N` no arquivo, mantendo a saída no terminal. |
+| `--isolation-gc` | Remove slots de isolamento e cópias rejeitadas antigas, e sai. |
 
-- **Cópia:** worktree git reaproveitado em `<state_dir>/worktrees/<repo>/slot-<n>` (até 8 por repositório; `WORKER_ASK_ISOLATION_SLOTS`, 1 a 32). A cada tentativa a cópia volta ao commit atual, recebe o estado não commitado do projeto (nunca arquivo de nome sensível nem repositório aninhado) e ganha atalhos para `node_modules`, `.venv` e `venv` ignorados pelo git (`WORKER_ASK_ISOLATION_LINKS`).
-- **Devolução:** ao fim de cada tentativa, qualquer que seja o rc, só os `--allowed-file` alterados na cópia são gravados no projeto. Trabalho parcial de worker que falhou também volta. Se o arquivo mudou no projeto durante a execução, nada é sobrescrito: aviso `conflito na devolucao`, rc 1 e a versão do worker fica na cópia.
-- **Fora do escopo:** arquivo alterado fora da lista não chega ao projeto; fica uma cópia em `<state_dir>/rejected/<run_id>/` por 7 dias (até 20 arquivos, 8 MiB).
-- **Sem slot livre** por 120 s: para com erro (`isolamento sem slot livre`), sem rodar direto.
-- **Quando não dá para isolar** (fora de git, repositório sem commit, `--cwd` ignorado pelo git, arquivo autorizado em repositório aninhado, estado não commitado acima de 512 MiB ou arquivo acima de 64 MiB): roda direto e registra `isolation: "none"` com o motivo. `WORKER_ASK_ISOLATION_STRICT=1` troca isso por rc 1.
-- **Limite:** não é sandbox de sistema. Worker com shell ainda consegue escrever fora da cópia por caminho absoluto; o roteador avisa (`arvore real mudou durante a execucao`) e conta em `real_tree_changed`. Os atalhos de dependência apontam para os diretórios reais.
-- **Operação:** `worker-ask --status` lista os slots; `worker-ask --isolation-gc` remove slots sem uso há 14 dias, slots de repositório que sumiu e cópias rejeitadas com mais de 7 dias. O `runs.jsonl` ganha `isolation`, `isolation_prep_s`, `overlay_files`, `sync_applied`, `sync_conflicts`, `oos_discarded` e `real_tree_changed`.
-
-**Fallback por estado** (`WORKER_ASK_STATE_FALLBACK=1`, só com isolamento, só em escrita): se um executor sem shell (ZCode, Muse, OpenCode) sai com rc 1 ou estoura o tempo e a cópia ficou idêntica (nenhum arquivo alterado, dentro ou fora do escopo) e os arquivos autorizados do projeto também, a cadeia segue para o próximo executor em vez de parar. A decisão usa só estado conferido, nunca texto de erro. Codex Luna e Claude Haiku têm shell e continuam parando. Cada vez que isso acontece conta em `state_fallbacks`.
-
-### Apresentação e log
-
-`bin/ask_presentation.py` envolve o `worker-ask` e os wrappers `-ask`: stdout segue byte a byte (é a resposta), o código de saída é preservado e o stderr bruto dos wrappers continua privado. O roteador manda eventos estruturados por um pipe dedicado (`ASK_PRESENTATION_FD=fd:inode`, validado pelo inode e removido do ambiente dos wrappers); sem esse canal ele mantém as linhas antigas (`zcode-worker: rc=0`, `skip`, `fallback`). A diretiva de timeout (`NAO assuma a tarefa...`) sai sempre no stderr.
+Códigos de saída: `0` ok, `1` erro, `75` cota (o roteador passa ao próximo executor), `124` timeout. O fallback automático ocorre somente em saída 75 ou executável ausente; saída 1 encerra a cadeia para preservar possíveis alterações parciais. Em escrita, mudanças nos arquivos autorizados após saída 75 bloqueiam o fallback. A apresentação no terminal resume cada tentativa:
 
 ```text
-◆ Workers · escrita · …/draft/busca-games · 3 arquivos · spec-fatia5.md · limite 40min
+◆ Workers · escrita · …/meu-projeto · 3 arquivos · spec-fatia5.md · limite 40min
   ↳ ZCode (glm-5.3-flash)
   ↷ ZCode: cota, tentando o próximo
   ↳ OpenCode (auto)
@@ -75,102 +89,50 @@ Com `WORKER_ASK_ISOLATION=write` (ou `all`, que inclui `--mode plan`), o worker 
   tentativas: ZCode cota (rc 75) → OpenCode ✓
 ```
 
-Em TTY, o progresso é uma única linha atualizada no lugar; fora de TTY há uma linha por mudança de estado e um batimento a cada `ASK_PRESENTATION_INTERVAL` segundos (padrão 60).
+## Como funciona
 
-- `ASK_PRESENTATION=auto|plain|json|off`: `auto` usa cor e linha viva só em TTY; `plain` nunca usa cor; `json` emite eventos JSON por linha; `off` não exibe nada.
-- `ASK_STYLE=compact|full|plain` (alias `WORKER_ASK_STYLE`): `full` acrescenta orquestrador, lista de arquivos, executores pulados, cache de tokens e sessão; `plain` equivale a `ASK_PRESENTATION=plain`.
-- `NO_COLOR` desliga cor; `--title`/`ASK_TITLE` acrescentam um título ao cabeçalho.
-- `worker-ask ... --log ARQ` substitui `> ARQ 2>&1; echo "exit=$?" >> ARQ`: grava stdout, stderr e a linha final `exit=N` (arquivo regular, sem symlink, criado com 0600), mantendo a saída no terminal.
+| Componente | Função |
+|---|---|
+| `worker_router.py` | Seleção de executores, timeout total, cooldown e verificação dos arquivos autorizados. |
+| `bin/codex-ask`, `bin/claude-ask`, `bin/muse-ask`, `bin/opencode-ask`, `bin/bonsai-ask` | Wrappers de cada sistema. |
+| `bin/ask-doctor`, `bin/ask-check` | Diagnóstico de interfaces e atualizações; o modo completo do doctor faz chamadas reais. |
+| `scripts/install.py` | Instalação conjunta e repetível, com backups de código e rollback. |
+| `adapters/bonsai/` | Cliente e guardas GameMode/GPU, sem chave, modelo ou serviço provisionado. |
+| `bin/ask_presentation.py` | Apresentação do terminal. |
+| `adapters/zcode/` | Engine, persistência de autenticação, launcher e testes do ZCode. |
+| `bin/zcode-worker`, `bin/zcode-cli` | Entrada local e admissão de processos. |
 
-### Log de execucoes
+## Recursos avançados
 
-Cada execucao que chega a cadeia de workers grava uma linha JSON em `<state_dir>/runs.jsonl` (`$XDG_STATE_HOME/worker-ask/runs.jsonl` ou `~/.local/state/worker-ask/runs.jsonl`). Serve para medir retrabalho e custo por tarefa: guarda apenas metricas (executor final, rc, duracao, tentativas de fallback, `spec_sha256`, tamanho do prompt e arquivos alterados). Nunca grava prompt, spec, stdout ou stderr dos workers. `--status`, `--help`, erros de uso e recursao bloqueada nao geram linha. Desliga com `WORKER_ASK_RUNS_LOG=0`. Acima de 5 MiB o arquivo gira para `runs.jsonl.1` (um backup so). Falha de escrita emite no maximo um aviso no stderr e nunca muda rc, stdout ou `--log`.
+Detalhes completos em [docs/operacao.md](docs/operacao.md):
 
-```bash
-python3 scripts/runs_report.py [--file PATH] [--days N] [--json]
-```
+- Isolamento por worktree: cópia do projeto por tentativa, com devolução só dos arquivos autorizados.
+- Fallback por estado: cadeia segue em frente quando o worker sem shell sai sem alterar nada.
+- Apresentação e log: variáveis `ASK_PRESENTATION`, `ASK_STYLE`, `--log` e batimento fora de TTY.
+- Log de execuções: uma linha JSON por execução em `runs.jsonl`, resumida por `scripts/runs_report.py`.
+- Cota e data de liberação: cooldown por executor a partir da data informada pelo provedor.
+- Tabela de disponibilidade: consulta de cota fora da chamada, com reserva de vaga por flock.
+- Cadeia de workers: ordem dos executores, opt-out do Muse e degrau pago do ZCode por último.
+- Validação e quality gate: comandos de teste e o portão de nove blocos.
 
-Na admissão ZCode, auxiliares cujo pai já é candidato no mesmo grupo de processo não consomem uma vaga extra; um worker em grupo independente continua sendo contado. O prazo de fila é separado do prazo total: aumentar `worker-ask --timeout` não altera a fila padrão de 30 segundos.
+## Limitações e uso responsável
 
-## Validação
+- Os CLIs de cada provedor e suas contas são dependências externas; o repositório não provisiona login, modelos nem serviços.
+- Sem isolamento, a lista de arquivos autorizados é verificação de estado, não sandbox: um worker com shell ainda consegue escrever fora por caminho absoluto.
+- Timeout (saída 124) não é cota: abre o circuito do executor por 300 segundos e, em escrita, a chamada atual para para preservar possíveis alterações parciais.
+- O `runs.jsonl` guarda só métricas (executor, duração, tentativas, hash da spec, arquivos alterados); nunca prompt, spec, stdout ou stderr. Credenciais, sessões, bancos, caches e relatórios gerados não entram no Git.
+- Cada tentativa executa os CLIs dos provedores com suas contas; o modo completo do `ask-doctor` faz chamadas reais.
 
-Os testes geram o candidato automaticamente a partir do core versionado em `bin/zcode-worker`; não dependem de um artefato `out/` prévio.
+## Documentação
 
-Dependências de desenvolvimento usadas: pytest, coverage.py com suporte a subprocessos, Ruff e Gitleaks. Os testes de CAS nativo e aceitação do launcher requerem o bundle ZCode instalado em `/opt/ZCode/resources/glm/zcode.cjs`.
+- [Operação do roteador](docs/operacao.md): isolamento, fallback por estado, apresentação, logs, cota, disponibilidade, cadeia e validação.
+- [Contrato de worker](docs/WORKER-CONTRACT.md): formato de tarefa e saída para executores.
+- [codex-local](docs/codex-local.md): experimento histórico fora do roteador.
 
-```bash
-python3 -m pytest -q
-cd adapters/zcode
-python3 scripts/make_candidate.py
-python3 -m pytest -q
-node --test tests/auth-session.test.cjs
-```
+## Contribuição
 
-Na raiz:
+Contribuições são bem-vindas em propostas pequenas e focadas; veja [Como contribuir](CONTRIBUTING.md).
 
-```bash
-python3 scripts/quality_gate.py run --root . --plan quality-gate.json --output quality-gate-result.json
-python3 scripts/quality_gate.py verify --report quality-gate-result.json
-```
+## Licença
 
-A mutação é uma amostra explícita das invariantes do roteador e da autenticação, não prova exaustiva. O launcher valida pontos específicos do bundle e falha fechado quando uma atualização os altera.
-
-## Fontes ativas e continuidade
-
-As fontes Python, scripts e autenticação em `~/.local/share/zcode-worker/` foram vinculadas a `adapters/zcode/`; os auxiliares em `~/.local/bin/` apontam para `bin/`. O core instalado `~/.local/bin/zcode-worker` permanece arquivo regular, copiado de `bin/zcode-worker`, porque o gerador de candidato exige arquivo regular. Após alterar esse core, validar e reinstalar a cópia, preservando modo executável. O core procura o pacote desta raiz quando executado aqui e usa o caminho instalado como alternativa.
-
-`migration-sources.json` registra a origem dos arquivos importados. O checkout ativo fica em `$HARNESS_ROOT/worker-ask` (raiz do harness local); a cópia em `harness/shared/harness-contracts` é legado. Backups da migração ficam apenas em `~/.local/state/worker-ask/source-migration-backup/`. Não mover o checkout enquanto os links estiverem ativos. O repositório não provisiona login, CLIs nativas, modelos ou serviços. Para instalar seus wrappers em outra máquina, clone este repositório e use `scripts/install.py`; prepare as dependências externas separadamente.
-
-## Validação conjunta (26/10/2026)
-
-O comando padrão na raiz passou com 676 testes e 26 subtestes; a suíte Node de autenticação passou em 18 casos. O quality gate passou nos nove blocos. Cobertura medida: 88,68% de linhas e 91,39% de branches, incluindo o roteador, o instalador e as funções de contagem de admissão. Mutação direcionada: 30/32 detectadas (93,75%, limiar 80%); os sobreviventes legados são `finite-time` e `no-symlink`. O instalador detectou 5/5 e a admissão 8/8; a amostra não é exaustiva. As funções alteradas de admissão atingiram 100% de linhas e branches.
-
-Uma chamada real ZCode após a correção de admissão respondeu OK com rc=0 em 28,5 segundos. Os demais provedores foram exercitados com CLIs/servidores sintéticos, sem gastar cota ou acessar credenciais reais. A disponibilidade dos serviços e contas é externa a este repositório.
-
-## Cota e data de liberacao
-
-O roteador consulta as fontes locais de limite antes de encaminhar a tarefa quando nao
-ha bloqueio registrado. Para ZCode e Codex, usa as consultas sem geracao do helper local
-`ask-limites-json`, quando instalado. O Codex usa o `CODEX_HOME` da chamada, sem assumir a
-conta da ponte. Para Claude, usa apenas cache de limite recente (ate 30 minutos).
-
-Ao receber rc75, os wrappers preservam somente a data de reset ou `Retry-After` do
-provedor em metadados; diagnosticos brutos continuam privados. O cache guarda o prazo
-real, inclusive semanal ou mensal, e pula esse worker em todas as chamadas ate vencer.
-Nao ha timer, sonda de modelo nem tentativa periodica antes da liberacao.
-
-`worker-ask --status` mostra `until` (epoch), `reset_known` e `ttl_remaining`.
-Se o provedor e a consulta nao informarem data, `until=null` e `reset_known=false`:
-o worker fica bloqueado para nao ser chamado repetidamente. Nesse caso a reavaliacao
-manual e explicita com `--retry-exhausted`; nao se inventa um reset de 60 segundos.
-Uma execucao bem-sucedida com essa opcao limpa o bloqueio. Muse e OpenCode dependem da
-data presente na resposta de erro; nao se usa uma chamada de modelo para sondar cota.
-
-A disponibilidade pode mudar depois da consulta. Timeout nao e cota: abre o circuito
-do executor por 300 segundos e depois permite nova tentativa;
-`blocked_reason=timeout` distingue esse caso da cota. Em escrita a chamada atual para
-para preservar possiveis alteracoes parciais. Entrada antiga de timeout sem prazo
-e ignorada. Cota desconhecida (`until=null`, `reset_known=false`) continua bloqueada.
-Os testes de cota usam HOME, provedores e CLIs sinteticos, sem contas.
-
-A tabela de disponibilidade (`availability.json`, gravada pelo timer
-`worker-ask-disponibilidade` ou por `worker-ask --refresh-availability`) tira a consulta
-de cota da chamada: o roteador le o prazo de cada worker na tabela, sonda vagas ao vivo
-(ZCode e OpenCode) e entrega direto ao primeiro livre. Sem vaga, o skip sai com motivo
-`ocupado`; fila de admissao cheia aparece como `fila` e nao grava cooldown. A fila do
-zcode-worker cai para 5 segundos (so margem de corrida) e o opencode-ask recebe
-`OPENCODE_ASK_WAIT=6` por padrao. Antes de lancar, o roteador reserva a vaga com flock
-(`vaga-<worker>-<i>.lock` no state dir), entao chamadas simultaneas nao disputam a mesma vaga:
-quem fica sem reserva sai como `ocupado` na hora. Ninguem livre: rc 75 imediato com o motivo de cada
-worker da cadeia. Tabela ausente mantem o comportamento anterior; tabela vencida ou
-invalida cai na consulta sincrona da chamada, com aviso (timer parado?).
-
-O parametro `--orchestrator` identifica quem delega e nao exclui workers da mesma plataforma.
-Codex tambem pode usar o worker Luna (`codex-ask`). A protecao contra recursao e
-`WORKER_ASK_ACTIVE=1`, propagada aos workers: eles nao podem delegar outra tarefa ao roteador.
-O Muse e padrao na cadeia; o opt-out por projeto usa `--no-muse`, `WORKER_ASK_NO_MUSE=1` ou o arquivo `.worker-ask-no-muse` na raiz do projeto (usar em projeto com dado pessoal, base de clientes, dump ou segredo real). `--allow-muse` virou no-op, mantido por compatibilidade.
-
-A cadeia vigente usa ZCode (so Start Plan), Muse (padrao; opt-out por projeto), OpenCode, Codex Luna, Claude Haiku e, por ultimo, ZCode no plano pago (`zcode-pago`).
-O plano pago do ZCode so entra quando nenhum outro worker atendeu: o degrau `zcode-worker` nunca cai no pago por conta propria (Start sem cota, ocupado ou desligado = rc 75 e a cadeia segue); so o degrau `zcode-pago` exporta `ZCODE_WORKER_ALLOW_PAID=1`. Fora do roteador, `zcode-worker` com modelo do Start so usa o pago com essa variavel definida. O `zcode-pago` fica sempre no fim, fora da ordem salva pelo painel.
-O degrau Terra foi retirado da cadeia; seu handler antigo permanece apenas por
-compatibilidade. Esta politica substitui a cadeia anunciada no commit 07cb87c.
+Distribuído sob a [licença MIT](LICENSE).
