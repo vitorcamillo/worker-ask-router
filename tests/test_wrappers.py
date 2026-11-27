@@ -82,6 +82,7 @@ record = {
     "name": name,
     "argv": sys.argv[1:],
     "cwd": os.getcwd(),
+    "tmpdir": os.environ.get("TMPDIR"),
     "anthropic_env": {k: v for k, v in os.environ.items() if k.startswith("ANTHROPIC_")},
 }
 with open(os.path.join(cap, name + "." + str(index) + ".json"), "w", encoding="utf-8") as fh:
@@ -138,8 +139,11 @@ if behavior == "qa_escape":
     # Tentativa real de escrita do "shell": fora do cwd (absoluto e relativo
     # ../) deve ser bloqueada pelo isolamento; dentro do cwd deve funcionar.
     results = {}
-    for key, target in (("abs", os.environ.get("STUB_ESCAPE_ABS", "")),
-                        ("rel", os.environ.get("STUB_ESCAPE_REL", ""))):
+    targets = [("abs", os.environ.get("STUB_ESCAPE_ABS", "")),
+               ("rel", os.environ.get("STUB_ESCAPE_REL", ""))]
+    if os.environ.get("STUB_ESCAPE_TMP"):
+        targets.append(("tmp", os.environ["STUB_ESCAPE_TMP"]))
+    for key, target in targets:
         try:
             with open(target, "w", encoding="utf-8") as fh:
                 fh.write("PWNED\\n")
@@ -768,6 +772,9 @@ class ClaudeAskContratoTest(WrapperTestBase):
                        "STUB_ESCAPE_ABS": abs_alvo,
                        "STUB_ESCAPE_REL": "../repo-rel.txt"})
         self.assertEqual(proc.returncode, 0, proc.stderr)
+        # O stub precisa ter sido alcancado dentro do sandbox: o tmpfs de
+        # /tmp o ocultaria sem o bind somente leitura do diretorio do CLI.
+        self.assertEqual(len(self.captures_in(qa_cap, "claude")), 1)
         with open(os.path.join(self.cwd, "escape-results.json"),
                   encoding="utf-8") as fh:
             results = json.load(fh)
@@ -779,6 +786,38 @@ class ClaudeAskContratoTest(WrapperTestBase):
         with open(os.path.join(self.cwd, "artifact.txt"),
                   encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "artefato qa\n")
+
+    def test_qa_tmpdir_herdado_nao_expoe_repositorio(self):
+        # Regressao do achado ALTA: o TMPDIR herdado contem o "repositorio";
+        # remonta-lo gravavel permitiria altera-lo pelo Bash. O sandbox deve
+        # usar um /tmp privado (tmpdir visto pelo stub = /tmp do tmpfs) e o
+        # arquivo sob o TMPDIR herdado deve ficar intacto.
+        herdado = os.path.join(self.root, "tmp-herdado")
+        os.makedirs(herdado)
+        alvo = os.path.join(herdado, "repo-tmp.txt")
+        with open(alvo, "w", encoding="utf-8") as fh:
+            fh.write("conteudo do repositorio\n")
+        qa_cap = os.path.join(self.cwd, "capture")
+        proc = self.run_wrapper(
+            "claude-ask", ["--cwd", self.cwd, "--mode", "qa",
+                           "tente escrever no TMPDIR herdado"],
+            behaviors={"STUB_BEHAVIOR_CLAUDE": "qa_escape"},
+            extra_env={"STUB_CAPTURE_DIR": qa_cap,
+                       "TMPDIR": herdado,
+                       "STUB_ESCAPE_ABS": alvo,
+                       "STUB_ESCAPE_REL": "../tmp-herdado/repo-tmp.txt",
+                       "STUB_ESCAPE_TMP": alvo})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        capturas = self.captures_in(qa_cap, "claude")
+        self.assertEqual(len(capturas), 1)
+        self.assertEqual(capturas[0]["tmpdir"], "/tmp")
+        with open(os.path.join(self.cwd, "escape-results.json"),
+                  encoding="utf-8") as fh:
+            results = json.load(fh)
+        self.assertEqual(results, {"abs": "blocked", "rel": "blocked",
+                                   "tmp": "blocked", "inside": "wrote"})
+        with open(alvo, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "conteudo do repositorio\n")
 
     def test_remove_anthropic_env_na_chamada(self):
         proc = self.run_wrapper(
