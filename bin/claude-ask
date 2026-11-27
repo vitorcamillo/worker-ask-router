@@ -24,7 +24,7 @@ if [ -f "$_kf" ]; then
     echo "claude-ask: AVISO: claude mudou desde a ultima validacao do ask-doctor" >&2
 fi
 
-cwd="" mode="plan" prompt="" model="" effort=""
+cwd="" mode="plan" prompt="" model="" effort="" com_tools=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --cwd) cwd="$2"; shift 2 ;;
@@ -36,12 +36,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -z "$prompt" ] && [ ! -t 0 ] && prompt="$(cat)"
-[ -z "$cwd" ] || [ -z "$prompt" ] && { echo "uso: claude-ask --cwd <dir> [--mode plan|write] \"tarefa\"" >&2; exit 1; }
+[ -z "$cwd" ] || [ -z "$prompt" ] && { echo "uso: claude-ask --cwd <dir> [--mode plan|write|qa] \"tarefa\"" >&2; exit 1; }
 
 case "$mode" in
   plan)  perm=plan; sem_tools="" ;;      # revisor precisa de git diff; o modo plan impede escrita
   write) perm=acceptEdits; sem_tools="Bash" ;;  # worker sem shell, como ZCode/Muse/OpenCode
-  *) echo "modo invalido: $mode (plan|write)" >&2; exit 1 ;;
+  # qa: cliente do produto (etapa QA do git-revisor): so shell (curl/navegador), sem editar nem delegar.
+  qa)    perm=default; com_tools="Bash"; sem_tools="Edit Write NotebookEdit Agent" ;;
+  *) echo "modo invalido: $mode (plan|write|qa)" >&2; exit 1 ;;
 esac
 
 # Contrato de resposta, identico nos wrappers zcode-worker/codex-ask/claude-ask:
@@ -82,7 +84,7 @@ log="$(mktemp)"; err="$(mktemp)"; trap 'rm -f "$log" "$err"' EXIT
 # (relê a conversa sem cache; ver § Claude: workers e exceções).
 cd "$cwd" && env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN CLAUDE_ASK_WORKER=1 \
   CLAUDE_CODE_DISABLE_ADVISOR_TOOL=1 \
-  timeout 1200 claude -p ${model:+--model "$model"} ${effort:+--effort "$effort"} --permission-mode "$perm" ${sem_tools:+--disallowedTools "$sem_tools"} -- "$prompt" </dev/null >"$log" 2>"$err"
+  timeout 1200 claude -p ${model:+--model "$model"} ${effort:+--effort "$effort"} --permission-mode "$perm" ${com_tools:+--allowedTools "$com_tools"} ${sem_tools:+--disallowedTools "$sem_tools"} -- "$prompt" </dev/null >"$log" 2>"$err"
 rc=$?
 if [ $rc -eq 0 ]; then
   cat "$log"; echo -e "\n--- claude-ask: modo=$mode modelo=${model:-padrao}${effort:+ esforco=$effort} ---"; exit 0
