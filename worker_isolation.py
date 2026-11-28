@@ -189,13 +189,14 @@ def _marker_dirs(cwd) -> list:
     """Diretórios onde o marcador pode estar: do cwd até o toplevel git (inclusive)."""
     chain = []
     cur = os.path.abspath(os.fspath(cwd))
+    initial = cur
     while True:
         chain.append(Path(cur))
         if os.path.lexists(os.path.join(cur, ".git")):
             return chain
         parent = os.path.dirname(cur)
         if parent == cur:
-            return chain[:1]  # sem git: só o cwd
+            return [Path(initial)]  # sem git: só o cwd
         cur = parent
 
 
