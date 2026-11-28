@@ -57,8 +57,7 @@ ver(){ # ver <nome> <atual> <pacote-npm>
 ver codex  "$(codex --version 2>/dev/null | awk '{print $2}')"  @openai/codex
 ver claude "$(claude --version 2>/dev/null | awk '{print $1}')" @anthropic-ai/claude-code
 say "zcode-cli: sem canal remoto conhecido — protegido por impressao digital ($(case " $DRIFTADOS " in *" zcode-"*) echo MUDOU ;; *) echo integro ;; esac))"
+if [ "$QUIET" -eq 0 ]; then say "exit=$CODE"; fi
 # Resumo por último: o alerta-falha mostra só as linhas finais do journal.
 [ "$drift" -eq 1 ] && say "RESUMO: drift em:$DRIFTADOS — rode 'ask-doctor' (ou toque Revalidar no Telegram)"
-
-if [ "$QUIET" -eq 0 ]; then say "exit=$CODE"; fi
 exit "$CODE"
